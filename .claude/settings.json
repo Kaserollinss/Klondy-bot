@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E \"\\\\.rs$\")",
+      "Bash(wc -l /Users/kase/Klondy-bot/src/*.rs)"
+    ]
+  }
+}
