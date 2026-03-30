@@ -45,6 +45,16 @@ impl ObservedBoard {
         let hidden_total: u8 = self.piles.iter().map(|pile| pile.hidden_count).sum();
         52 - foundation_count - pile_visible - hidden_total
     }
+
+    fn is_clearly_unrecognized(&self) -> bool {
+        self.foundation.iter().all(|count| *count == 0)
+            && self.waste.is_empty()
+            && !self.stock_present
+            && self
+                .piles
+                .iter()
+                .all(|pile| pile.hidden_count == 0 && pile.cards.is_empty())
+    }
 }
 
 pub trait SolitaireCashBackend {
@@ -76,6 +86,7 @@ pub struct SolitaireCashLayout {
     pub(crate) tableau_top: f32,
     pub(crate) hidden_fan_y: f32,
     pub(crate) visible_fan_y: f32,
+    stock_tap_point: Point,
     submit_point: Point,
     undo_point: Point,
 }
@@ -83,24 +94,25 @@ pub struct SolitaireCashLayout {
 impl Default for SolitaireCashLayout {
     fn default() -> Self {
         Self {
-            // Normalized from the supplied iPhone screenshots (1290 x 2796).
+            // Normalized from the mirrored macOS capture geometry (1280 x 1960).
             column_lefts: [
-                5.0 / 1290.0,
-                189.0 / 1290.0,
-                373.0 / 1290.0,
-                558.0 / 1290.0,
-                742.0 / 1290.0,
-                926.0 / 1290.0,
-                1110.0 / 1290.0,
+                124.0 / 1280.0,
+                272.0 / 1280.0,
+                420.0 / 1280.0,
+                568.0 / 1280.0,
+                716.0 / 1280.0,
+                864.0 / 1280.0,
+                1012.0 / 1280.0,
             ],
-            card_width: 174.0 / 1290.0,
-            card_height: 246.0 / 2796.0,
-            top_row_top: 572.0 / 2796.0,
-            tableau_top: 1009.0 / 2796.0,
-            hidden_fan_y: 35.0 / 2796.0,
-            visible_fan_y: 70.0 / 2796.0,
-            submit_point: Point::new(0.18, 0.903),
-            undo_point: Point::new(0.77, 0.903),
+            card_width: 150.0 / 1280.0,
+            card_height: 207.0 / 1960.0,
+            top_row_top: 521.0 / 1960.0,
+            tableau_top: 883.0 / 1960.0,
+            hidden_fan_y: 28.0 / 1960.0,
+            visible_fan_y: 58.0 / 1960.0,
+            stock_tap_point: Point::new(615.0 / 640.0, 350.0 / 980.0),
+            submit_point: Point::new(0.202, 0.935),
+            undo_point: Point::new(0.798, 0.935),
         }
     }
 }
@@ -117,15 +129,15 @@ impl SolitaireCashLayout {
         self.card_center(suit as usize, self.top_row_top)
     }
 
-    fn stock_point(&self) -> Point {
-        self.card_center(6, self.top_row_top)
+    pub(crate) fn stock_point(&self) -> Point {
+        self.stock_tap_point
     }
 
-    fn waste_point(&self) -> Point {
+    pub(crate) fn waste_point(&self) -> Point {
         self.card_center(4, self.top_row_top)
     }
 
-    fn undo_point(&self) -> Point {
+    pub(crate) fn undo_point(&self) -> Point {
         self.undo_point
     }
 
@@ -221,6 +233,10 @@ impl<B: SolitaireCashBackend> SolitaireCashAdapter<B> {
         }
     }
 
+    fn describe_point(point: Point) -> String {
+        format!("({:.3},{:.3})", point.x, point.y)
+    }
+
     fn describe_board(&self, board: &PartialBoard) -> String {
         let pile_summary = board
             .pile_cards
@@ -305,7 +321,11 @@ impl<B: SolitaireCashBackend> SolitaireCashAdapter<B> {
         original: &ObservedBoard,
     ) -> Result<(Option<ArrayVec<Card, { N_DECK_CARDS as usize }>>, u8), AdapterError> {
         if !self.scan_full_deck || !self.backend.can_interact() {
-            self.debug_log("full deck scan skipped");
+            self.debug_log(format!(
+                "full deck scan skipped: enabled={} can_interact={}",
+                self.scan_full_deck,
+                self.backend.can_interact()
+            ));
             return Ok((None, 0));
         }
 
@@ -319,10 +339,12 @@ impl<B: SolitaireCashBackend> SolitaireCashAdapter<B> {
         let stock_point = self.layout.stock_point();
         let undo_point = self.layout.undo_point();
         self.debug_log(format!(
-            "starting deck scan: waste_visible={} stock_present={} total_deck_cards={}",
+            "starting deck scan: waste_visible={} stock_present={} total_deck_cards={} stock_point={} undo_point={}",
             working.waste.len(),
             working.stock_present,
-            total_deck_cards
+            total_deck_cards,
+            Self::describe_point(stock_point),
+            Self::describe_point(undo_point)
         ));
 
         while !(working.stock_present && working.waste.is_empty()) {
@@ -343,8 +365,11 @@ impl<B: SolitaireCashBackend> SolitaireCashAdapter<B> {
         }
 
         let taps_to_cycle_start = taps_used;
-        let mut known_deck_order = ArrayVec::<Card, { N_DECK_CARDS as usize }>::new();
-        while working.stock_present {
+        let mut known_slots = vec![None; total_deck_cards as usize];
+        let mut draw_cur = 0u8;
+        let mut completed_cycles = 0u8;
+        let mut filled_at_cycle_start = 0usize;
+        while known_slots.iter().any(Option::is_none) {
             if taps_used >= self.max_deck_scan_taps {
                 return Err(AdapterError::RecognitionError(
                     "deck scan exceeded tap budget during stock traversal".into(),
@@ -353,34 +378,76 @@ impl<B: SolitaireCashBackend> SolitaireCashAdapter<B> {
             self.tap_and_wait(stock_point, self.scan_tap_delay)?;
             taps_used += 1;
             working = self.observe()?;
-            let revealed = usize::from(
-                self.draw_step
-                    .min(total_deck_cards.saturating_sub(known_deck_order.len() as u8)),
-            );
-            let newly_visible_start = working.waste.len().saturating_sub(revealed);
-            known_deck_order
-                .try_extend_from_slice(&working.waste[newly_visible_start..])
-                .map_err(|_| {
-                    AdapterError::RecognitionError(
-                        "detected more deck cards than fit in a Klondike stock".into(),
-                    )
-                })?;
+
+            if working.stock_present && working.waste.is_empty() {
+                completed_cycles += 1;
+                let filled_now = known_slots.iter().filter(|slot| slot.is_some()).count();
+                self.debug_log(format!(
+                    "deck scan reset/recycle tap {}: completed_cycles={} filled={}/{}",
+                    taps_used, completed_cycles, filled_now, total_deck_cards
+                ));
+                if filled_now == total_deck_cards as usize {
+                    break;
+                }
+                if filled_now == filled_at_cycle_start {
+                    return Err(AdapterError::RecognitionError(format!(
+                        "deck scan stalled after {} full cycle(s): captured {} cards, expected {}",
+                        completed_cycles, filled_now, total_deck_cards
+                    )));
+                }
+                filled_at_cycle_start = filled_now;
+                draw_cur = 0;
+                continue;
+            }
+
+            let next_draw_cur = (draw_cur + self.draw_step).min(total_deck_cards);
+            let visible_len = working.waste.len().min(next_draw_cur as usize);
+            let slot_start = next_draw_cur as usize - visible_len;
+            let slot_end = next_draw_cur as usize;
+
+            for (slot, card) in known_slots[slot_start..slot_end]
+                .iter_mut()
+                .zip(working.waste.iter())
+            {
+                match slot {
+                    Some(existing) if *existing != *card => {
+                        return Err(AdapterError::RecognitionError(format!(
+                            "deck scan observed conflicting cards for slot {}: saw {} then {}",
+                            slot_start, existing, card
+                        )));
+                    }
+                    Some(_) => {}
+                    None => *slot = Some(*card),
+                }
+            }
+            draw_cur = next_draw_cur;
+            let filled_now = known_slots.iter().filter(|slot| slot.is_some()).count();
             self.debug_log(format!(
-                "deck scan reveal tap {}: appended={} total_known={} waste_visible={} stock_present={}",
+                "deck scan reveal tap {}: draw_cur={} filled={}/{} waste_visible={} stock_present={}",
                 taps_used,
-                revealed.min(working.waste.len()),
-                known_deck_order.len(),
+                draw_cur,
+                filled_now,
+                total_deck_cards,
                 working.waste.len(),
                 working.stock_present
             ));
         }
 
-        if known_deck_order.len() as u8 != total_deck_cards {
-            return Err(AdapterError::RecognitionError(format!(
-                "deck scan captured {} cards, expected {}",
-                known_deck_order.len(),
-                total_deck_cards
-            )));
+        let mut known_deck_order = ArrayVec::<Card, { N_DECK_CARDS as usize }>::new();
+        for (idx, slot) in known_slots.into_iter().enumerate() {
+            let card = slot.ok_or_else(|| {
+                AdapterError::RecognitionError(format!(
+                    "deck scan missed card at deck position {}",
+                    idx
+                ))
+            })?;
+            known_deck_order
+                .try_push(card)
+                .map_err(|_| {
+                    AdapterError::RecognitionError(
+                        "detected more deck cards than fit in a Klondike stock".into(),
+                    )
+                })?;
         }
 
         for _ in 0..taps_used {
@@ -446,8 +513,29 @@ impl<B: SolitaireCashBackend> SolitaireCashAdapter<B> {
 
 impl<B: SolitaireCashBackend> ScreenAdapter for SolitaireCashAdapter<B> {
     fn read_board(&mut self) -> Result<PartialBoard, AdapterError> {
-        self.debug_log("capturing board");
+        self.debug_log("startup step 1/4: capturing board");
         let observed = self.observe()?;
+        self.debug_log(format!(
+            "startup step 2/4: recognized visible state waste_visible={} stock_present={} total_deck_cards={}",
+            observed.waste.len(),
+            observed.stock_present,
+            observed.total_deck_cards()
+        ));
+        if observed.is_clearly_unrecognized() {
+            self.debug_log(
+                "recognizer returned an impossible empty board; refusing to interact with the screen",
+            );
+            return Err(AdapterError::RecognitionError(
+                "recognized an impossible empty board; the capture region is correct, but the Solitaire Cash layout calibration does not match this mirrored window yet".into(),
+            ));
+        }
+        if self.scan_full_deck && self.backend.can_interact() && observed.total_deck_cards() > 0 {
+            self.debug_log(format!(
+                "startup step 3/4: full deck scan enabled, will use stock_point={} and undo_point={}",
+                Self::describe_point(self.layout.stock_point()),
+                Self::describe_point(self.layout.undo_point())
+            ));
+        }
         let (known_deck_order, taps_to_cycle_start) = self.scan_known_deck_order(&observed)?;
         let total_deck_cards = observed.total_deck_cards();
         let stock_count = if let Some(_) = known_deck_order {
@@ -468,6 +556,12 @@ impl<B: SolitaireCashBackend> ScreenAdapter for SolitaireCashAdapter<B> {
         } else {
             observed.waste.clone()
         };
+        self.debug_log(format!(
+            "startup step 4/4: solved visible stock_count={} waste_visible={} known_deck={}",
+            stock_count,
+            waste.len(),
+            known_deck_order.as_ref().map_or(0, |deck| deck.len())
+        ));
 
         let board = PartialBoard {
             pile_cards: core::array::from_fn(|idx| observed.piles[idx].cards.clone()),
@@ -677,5 +771,24 @@ mod tests {
         assert!(board.known_deck_order.is_none());
         assert_eq!(board.stock_count, 2);
         assert_eq!(board.waste.len(), 3);
+    }
+
+    #[test]
+    fn read_board_rejects_impossible_empty_observation_before_scanning() {
+        let mut backend = MockBackend::new(&[], 0, true);
+        backend.foundation = [0; 4];
+        let mut adapter = SolitaireCashAdapter::new(backend)
+            .with_settle_time(Duration::ZERO)
+            .with_scan_tap_delay(Duration::ZERO);
+
+        match adapter.read_board() {
+            Ok(_) => panic!("expected impossible empty observation to fail"),
+            Err(AdapterError::RecognitionError(message)) => {
+                assert!(message.contains("impossible empty board"));
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+
+        assert_eq!(adapter.backend().taps.len(), 0);
     }
 }

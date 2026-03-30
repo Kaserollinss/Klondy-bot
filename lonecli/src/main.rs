@@ -9,7 +9,7 @@ use loneadapter::adapters::solitaire_cash_macos::{
     DebugOptions, MacNativeMouse, MacScreenCapture, PapayaSolitaireCashRecognizer, ScreenRegion,
     ScreenshotVisionBackend,
 };
-use loneadapter::{DriverMode, GameDriver};
+use loneadapter::{AdapterError, DriverMode, GameDriver};
 use lonelybot::convert::convert_moves;
 use lonelybot::engine::SolitaireEngine;
 use lonelybot::mcts_solver::pick_moves;
@@ -301,7 +301,7 @@ fn default_solitaire_cash_assets() -> PathBuf {
         .join("Img")
 }
 
-fn run_solitaire_cash_screen(args: &ScreenSolitaireCashArgs) {
+fn run_solitaire_cash_screen(args: &ScreenSolitaireCashArgs) -> Result<(), AdapterError> {
     let region = ScreenRegion::new(args.x, args.y, args.width, args.height);
     let debug = DebugOptions {
         enabled: args.debug,
@@ -325,8 +325,7 @@ fn run_solitaire_cash_screen(args: &ScreenSolitaireCashArgs) {
     }
 
     let capture = MacScreenCapture::new(region).with_debug(debug.clone());
-    let recognizer = PapayaSolitaireCashRecognizer::from_asset_dir(&args.assets)
-        .unwrap()
+    let recognizer = PapayaSolitaireCashRecognizer::from_asset_dir(&args.assets)?
         .with_debug(debug.clone());
     let backend = ScreenshotVisionBackend::new(capture, recognizer, region)
         .with_debug(debug.clone())
@@ -343,11 +342,13 @@ fn run_solitaire_cash_screen(args: &ScreenSolitaireCashArgs) {
         .with_mcts_params(args.mcts_iterations, args.mcts_limit);
 
     if args.loop_mode || matches!(args.mode, ScreenMode::Autoplay) {
-        driver.run().unwrap();
+        driver.run()?;
     } else {
-        let move_desc = driver.step().unwrap();
+        let move_desc = driver.step()?;
         println!("{move_desc}");
     }
+
+    Ok(())
 }
 
 fn main() {
@@ -390,7 +391,12 @@ fn main() {
             }
         }
         Commands::Screen { game } => match game {
-            ScreenCommands::SolitaireCash(args) => run_solitaire_cash_screen(args),
+            ScreenCommands::SolitaireCash(args) => {
+                if let Err(err) = run_solitaire_cash_screen(args) {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
         },
     }
 }

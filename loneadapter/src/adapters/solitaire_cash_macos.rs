@@ -181,6 +181,11 @@ impl VisionOcrRunner {
             return Ok(());
         }
 
+        eprintln!(
+            "[solitaire-cash-debug] compiling Vision OCR helper to {}",
+            self.executable_path.display()
+        );
+
         if let Some(parent) = self.source_path.parent() {
             fs::create_dir_all(parent).map_err(|err| {
                 AdapterError::RecognitionError(format!(
@@ -764,12 +769,22 @@ where
     }
 
     fn tap(&mut self, point: Point) -> Result<(), AdapterError> {
-        self.mouse.tap_abs(self.region.point_to_screen(point))
+        let absolute = self.region.point_to_screen(point);
+        self.debug.log(format!(
+            "tap normalized=({:.3},{:.3}) absolute=({:.1},{:.1})",
+            point.x, point.y, absolute.0, absolute.1
+        ));
+        self.mouse.tap_abs(absolute)
     }
 
     fn drag(&mut self, from: Point, to: Point) -> Result<(), AdapterError> {
-        self.mouse
-            .drag_abs(self.region.point_to_screen(from), self.region.point_to_screen(to))
+        let from_abs = self.region.point_to_screen(from);
+        let to_abs = self.region.point_to_screen(to);
+        self.debug.log(format!(
+            "drag normalized=({:.3},{:.3})->({:.3},{:.3}) absolute=({:.1},{:.1})->({:.1},{:.1})",
+            from.x, from.y, to.x, to.y, from_abs.0, from_abs.1, to_abs.0, to_abs.1
+        ));
+        self.mouse.drag_abs(from_abs, to_abs)
     }
 
     fn can_interact(&self) -> bool {
@@ -829,6 +844,10 @@ impl MacScreenCapture {
 
 impl ScreenshotSource for MacScreenCapture {
     fn capture_png(&mut self) -> Result<PathBuf, AdapterError> {
+        self.debug.log(format!(
+            "running screencapture for region x={} y={} width={} height={}",
+            self.region.x, self.region.y, self.region.width, self.region.height
+        ));
         let status = self.build_command().status().map_err(|err| {
             AdapterError::CaptureError(format!("failed to launch screencapture: {err}"))
         })?;
