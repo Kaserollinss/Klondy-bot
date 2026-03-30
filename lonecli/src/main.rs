@@ -4,6 +4,12 @@ mod tui;
 
 use bpci::{Interval, NSuccessesSample, WilsonScore};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use loneadapter::adapters::solitaire_cash::SolitaireCashAdapter;
+use loneadapter::adapters::solitaire_cash_macos::{
+    DebugOptions, MacNativeMouse, MacScreenCapture, PapayaSolitaireCashRecognizer, ScreenRegion,
+    ScreenshotVisionBackend,
+};
+use loneadapter::{DriverMode, GameDriver};
 use lonelybot::convert::convert_moves;
 use lonelybot::engine::SolitaireEngine;
 use lonelybot::mcts_solver::pick_moves;
@@ -15,7 +21,9 @@ use lonelybot::tracking::{BudgetedTerminateSignal, DefaultTerminateSignal, Empty
 use rand::prelude::*;
 use solvitaire::Solvitaire;
 use std::num::NonZeroU8;
+use std::path::PathBuf;
 use std::time;
+use std::time::Duration;
 
 use lonelybot::standard::{StandardMove, StandardSolitaire};
 
@@ -239,6 +247,107 @@ enum Commands {
         seed: StringSeed,
         draw_step: NonZeroU8,
     },
+    Screen {
+        #[command(subcommand)]
+        game: ScreenCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScreenCommands {
+    SolitaireCash(ScreenSolitaireCashArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ScreenMode {
+    Advisor,
+    Autoplay,
+}
+
+#[derive(Args, Clone)]
+struct ScreenSolitaireCashArgs {
+    #[arg(long, default_value_t = 0)]
+    x: u32,
+    #[arg(long, default_value_t = 0)]
+    y: u32,
+    #[arg(long, default_value_t = 640)]
+    width: u32,
+    #[arg(long, default_value_t = 980)]
+    height: u32,
+    #[arg(long, value_enum, default_value_t = ScreenMode::Advisor)]
+    mode: ScreenMode,
+    #[arg(long)]
+    loop_mode: bool,
+    #[arg(long, default_value_t = 3000)]
+    mcts_iterations: usize,
+    #[arg(long, default_value_t = 1000)]
+    mcts_limit: usize,
+    #[arg(long, default_value_t = 180)]
+    scan_delay_ms: u64,
+    #[arg(long, default_value_t = 500)]
+    settle_ms: u64,
+    #[arg(long, default_value_os_t = default_solitaire_cash_assets())]
+    assets: PathBuf,
+    #[arg(long)]
+    debug: bool,
+    #[arg(long)]
+    debug_dir: Option<PathBuf>,
+}
+
+fn default_solitaire_cash_assets() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("Img")
+}
+
+fn run_solitaire_cash_screen(args: &ScreenSolitaireCashArgs) {
+    let region = ScreenRegion::new(args.x, args.y, args.width, args.height);
+    let debug = DebugOptions {
+        enabled: args.debug,
+        dump_dir: args.debug_dir.clone(),
+    };
+
+    if args.debug {
+        eprintln!(
+            "[solitaire-cash] starting mode={:?} loop={} region=({}, {}) -> {}x{} assets={}",
+            args.mode,
+            args.loop_mode,
+            args.x,
+            args.y,
+            args.width,
+            args.height,
+            args.assets.display()
+        );
+        if let Some(dir) = &args.debug_dir {
+            eprintln!("[solitaire-cash] debug screenshots will be copied to {}", dir.display());
+        }
+    }
+
+    let capture = MacScreenCapture::new(region).with_debug(debug.clone());
+    let recognizer = PapayaSolitaireCashRecognizer::from_asset_dir(&args.assets)
+        .unwrap()
+        .with_debug(debug.clone());
+    let backend = ScreenshotVisionBackend::new(capture, recognizer, region)
+        .with_debug(debug.clone())
+        .with_mouse(MacNativeMouse::new());
+    let adapter = SolitaireCashAdapter::new(backend)
+        .with_scan_tap_delay(Duration::from_millis(args.scan_delay_ms))
+        .with_settle_time(Duration::from_millis(args.settle_ms))
+        .with_debug(args.debug);
+    let mode = match args.mode {
+        ScreenMode::Advisor => DriverMode::Advisor,
+        ScreenMode::Autoplay => DriverMode::AutoPlay,
+    };
+    let mut driver = GameDriver::new(adapter, mode)
+        .with_mcts_params(args.mcts_iterations, args.mcts_limit);
+
+    if args.loop_mode || matches!(args.mode, ScreenMode::Autoplay) {
+        driver.run().unwrap();
+    } else {
+        let move_desc = driver.step().unwrap();
+        println!("{move_desc}");
+    }
 }
 
 fn main() {
@@ -280,5 +389,8 @@ fn main() {
                 );
             }
         }
+        Commands::Screen { game } => match game {
+            ScreenCommands::SolitaireCash(args) => run_solitaire_cash_screen(args),
+        },
     }
 }

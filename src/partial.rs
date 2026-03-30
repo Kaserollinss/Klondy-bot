@@ -21,6 +21,11 @@ pub struct PartialBoard {
     pub foundation: [u8; N_SUITS as usize],
     /// Visible waste cards, bottom to top (top = currently drawable).
     pub waste: ArrayVec<Card, { N_DECK_CARDS as usize }>,
+    /// Exact current deck order when known: [hidden waste | visible waste | stock].
+    ///
+    /// This is especially useful for screen adapters that can cycle the stock and
+    /// reconstruct the real draw-3 sequence instead of randomizing the unseen waste.
+    pub known_deck_order: Option<ArrayVec<Card, { N_DECK_CARDS as usize }>>,
     /// Number of cards remaining in stock (face-down, undealt).
     pub stock_count: u8,
     /// Draw step (1 or 3).
@@ -39,6 +44,10 @@ pub enum PartialBoardError {
     InvalidFoundation { suit: u8, count: u8 },
     /// Invalid draw step (must be 1 or 3).
     InvalidDrawStep(u8),
+    /// Known deck order length doesn't match the number of deck cards in play.
+    InvalidDeckOrderLen { expected: u8, got: u8 },
+    /// Visible waste disagrees with the supplied exact deck ordering.
+    VisibleWasteMismatch,
 }
 
 impl PartialBoard {
@@ -67,6 +76,13 @@ impl PartialBoard {
             }
         }
 
+        let foundation_count: u8 = self.foundation.iter().sum();
+        let pile_visible: u8 = self.pile_cards.iter().map(|p| p.len() as u8).sum();
+        let hidden_total: u8 = self.hidden_counts.iter().sum();
+        let total_deck = N_CARDS - foundation_count - pile_visible - hidden_total;
+        let visible_waste = self.waste.len() as u8;
+        let waste_invisible = total_deck.saturating_sub(self.stock_count + visible_waste);
+
         // Check for duplicate known cards
         let mut seen: u64 = 0;
         let mut mark = |card: Card| -> Result<(), PartialBoardError> {
@@ -92,20 +108,42 @@ impl PartialBoard {
             }
         }
 
-        // Visible waste cards
-        for &card in &self.waste {
-            mark(card)?;
+        if let Some(deck_order) = &self.known_deck_order {
+            let got = deck_order.len() as u8;
+            if got != total_deck {
+                return Err(PartialBoardError::InvalidDeckOrderLen {
+                    expected: total_deck,
+                    got,
+                });
+            }
+
+            let visible_start = waste_invisible as usize;
+            let visible_end = visible_start + self.waste.len();
+            if deck_order
+                .get(visible_start..visible_end)
+                .filter(|cards| *cards == self.waste.as_slice())
+                .is_none()
+            {
+                return Err(PartialBoardError::VisibleWasteMismatch);
+            }
+
+            for &card in deck_order {
+                mark(card)?;
+            }
+        } else {
+            // Visible waste cards
+            for &card in &self.waste {
+                mark(card)?;
+            }
         }
 
         // Total card count check
         let known_count = seen.count_ones() as u8;
-        let visible_waste = self.waste.len() as u8;
-        let foundation_count: u8 = self.foundation.iter().sum();
-        let pile_visible: u8 = self.pile_cards.iter().map(|p| p.len() as u8).sum();
-        let hidden_total: u8 = self.hidden_counts.iter().sum();
-        let total_deck = N_CARDS - foundation_count - pile_visible - hidden_total;
-        let waste_invisible = total_deck.saturating_sub(self.stock_count + visible_waste);
-        let actual_unknown = hidden_total + self.stock_count + waste_invisible;
+        let actual_unknown = if self.known_deck_order.is_some() {
+            hidden_total
+        } else {
+            hidden_total + self.stock_count + waste_invisible
+        };
 
         if known_count + actual_unknown != N_CARDS {
             return Err(PartialBoardError::InvalidCardCount {
@@ -140,8 +178,14 @@ impl PartialBoard {
                 known_mask |= card.mask();
             }
         }
-        for &card in &self.waste {
-            known_mask |= card.mask();
+        if let Some(deck_order) = &self.known_deck_order {
+            for &card in deck_order {
+                known_mask |= card.mask();
+            }
+        } else {
+            for &card in &self.waste {
+                known_mask |= card.mask();
+            }
         }
 
         // 2. Collect remaining unknown cards and shuffle
@@ -173,29 +217,35 @@ impl PartialBoard {
         let pile_visible: u8 = self.pile_cards.iter().map(|p| p.len() as u8).sum();
         let hidden_total: u8 = self.hidden_counts.iter().sum();
         let total_deck_cards = N_CARDS - foundation_count - pile_visible - hidden_total;
-        let visible_waste = self.waste.len() as u8;
-        let waste_invisible = total_deck_cards.saturating_sub(self.stock_count + visible_waste);
-
         let mut deck_cards: ArrayVec<Card, { N_DECK_CARDS as usize }> = ArrayVec::new();
+        let draw_cur = if let Some(deck_order) = &self.known_deck_order {
+            deck_cards.try_extend_from_slice(deck_order).unwrap();
+            total_deck_cards - self.stock_count
+        } else {
+            let visible_waste = self.waste.len() as u8;
+            let waste_invisible = total_deck_cards.saturating_sub(self.stock_count + visible_waste);
 
-        // Non-visible waste (unknown, filled from remaining)
-        for _ in 0..waste_invisible {
-            deck_cards.push(remaining[idx]);
-            idx += 1;
-        }
+            // Non-visible waste (unknown, filled from remaining)
+            for _ in 0..waste_invisible {
+                deck_cards.push(remaining[idx]);
+                idx += 1;
+            }
 
-        // Visible waste
-        for &card in &self.waste {
-            deck_cards.push(card);
-        }
+            // Visible waste
+            for &card in &self.waste {
+                deck_cards.push(card);
+            }
 
-        let draw_cur = deck_cards.len() as u8;
+            let draw_cur = deck_cards.len() as u8;
 
-        // Stock (unknown, filled from remaining)
-        for _ in 0..self.stock_count {
-            deck_cards.push(remaining[idx]);
-            idx += 1;
-        }
+            // Stock (unknown, filled from remaining)
+            for _ in 0..self.stock_count {
+                deck_cards.push(remaining[idx]);
+                idx += 1;
+            }
+
+            draw_cur
+        };
 
         let draw_step = NonZeroU8::new(self.draw_step).unwrap();
         let deck = Deck::from_cards(&deck_cards, draw_cur, draw_step);
@@ -276,6 +326,7 @@ mod tests {
             hidden_counts: core::array::from_fn(|i| std_game.get_hidden()[i].len() as u8),
             foundation: [0; 4], // new game, no foundation
             waste: ArrayVec::new(),
+            known_deck_order: None,
             stock_count: N_DECK_CARDS, // all 24 cards in stock
             draw_step: 3,
         };
@@ -308,6 +359,7 @@ mod tests {
             hidden_counts: [0; 7],
             foundation: [1, 0, 0, 0], // Ace of hearts on foundation
             waste: ArrayVec::new(),
+            known_deck_order: None,
             stock_count: 0,
             draw_step: 1,
         };
@@ -343,5 +395,45 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(999);
         let solitaire = board.to_solitaire(&mut rng);
         assert_eq!(solitaire.get_stack().get(0), 1); // hearts has 1 card
+    }
+
+    #[test]
+    fn test_known_deck_order_round_trip() {
+        use rand::SeedableRng;
+
+        let cards = default_shuffle(7);
+        let draw_step = NonZeroU8::new(3).unwrap();
+        let mut std_game = StandardSolitaire::new(&cards, draw_step);
+        std_game.do_move(&crate::standard::StandardMove::DRAW_NEXT).unwrap();
+        std_game.do_move(&crate::standard::StandardMove::DRAW_NEXT).unwrap();
+
+        let waste: ArrayVec<Card, { N_DECK_CARDS as usize }> =
+            std_game.get_deck().waste_iter().collect();
+        let deck_order: ArrayVec<Card, { N_DECK_CARDS as usize }> =
+            std_game.get_deck().iter().collect();
+
+        let board = PartialBoard {
+            pile_cards: std_game.get_piles().clone(),
+            hidden_counts: core::array::from_fn(|i| std_game.get_hidden()[i].len() as u8),
+            foundation: [0; 4],
+            waste,
+            known_deck_order: Some(deck_order.clone()),
+            stock_count: std_game.get_deck().deck_iter().len() as u8,
+            draw_step: 3,
+        };
+
+        board.validate().unwrap();
+
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(1);
+        let rebuilt = board.to_standard_solitaire(&mut rng);
+
+        let rebuilt_order: ArrayVec<Card, { N_DECK_CARDS as usize }> =
+            rebuilt.get_deck().iter().collect();
+        let rebuilt_waste: ArrayVec<Card, { N_DECK_CARDS as usize }> =
+            rebuilt.get_deck().waste_iter().collect();
+
+        assert_eq!(rebuilt_order, deck_order);
+        assert_eq!(rebuilt_waste, board.waste);
+        assert_eq!(rebuilt.get_deck().peek_current(), std_game.get_deck().peek_current());
     }
 }

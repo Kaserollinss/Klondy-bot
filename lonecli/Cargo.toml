@@ -17,6 +17,7 @@ bpci = "0.1.0"
 signal-hook = "0.3.17"
 clap = { version = "4.5.3", features = ["std", "derive"] }
 lonelybot = { path = "../" }
+loneadapter = { path = "../loneadapter" }
 rand = { version = "0.9", default-features = false, features = ["small_rng"] }
 
 [dev-dependencies]

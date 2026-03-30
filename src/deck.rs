@@ -402,7 +402,7 @@ mod tests {
                 }
 
                 for filter in [false, true] {
-                    deck.iter_callback(filter, |pos, card| {
+                    let _ = deck.iter_callback(filter, |pos, card| {
                         assert_eq!(deck.peek(pos), card);
                         ControlFlow::<()>::Continue(())
                     });

@@ -637,7 +637,7 @@ mod tests {
                     .collect::<ArrayVec<(u8, Card), { N_DECK_CARDS as usize }>>();
 
                 test.clear();
-                game.deck.iter_callback(false, |pos, x| {
+                let _ = game.deck.iter_callback(false, |pos, x| {
                     test.push((pos, x));
                     ControlFlow::<()>::Continue(())
                 });

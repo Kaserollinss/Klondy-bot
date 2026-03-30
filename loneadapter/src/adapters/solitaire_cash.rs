@@ -1,0 +1,681 @@
+use std::thread;
+use std::time::Duration;
+
+use arrayvec::ArrayVec;
+use lonelybot::card::{Card, N_SUITS};
+use lonelybot::deck::{N_DECK_CARDS, N_PILES};
+use lonelybot::partial::PartialBoard;
+use lonelybot::standard::{PileVec, Pos, StandardMove};
+
+use crate::adapter::{AdapterError, ScreenAdapter};
+
+const DRAW_STEP: u8 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Point {
+    const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedPile {
+    pub hidden_count: u8,
+    pub cards: PileVec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedBoard {
+    pub foundation: [u8; N_SUITS as usize],
+    pub piles: [ObservedPile; N_PILES as usize],
+    pub waste: ArrayVec<Card, { N_DECK_CARDS as usize }>,
+    pub stock_count: u8,
+    pub stock_present: bool,
+}
+
+impl ObservedBoard {
+    fn total_deck_cards(&self) -> u8 {
+        let foundation_count: u8 = self.foundation.iter().sum();
+        let pile_visible: u8 = self.piles.iter().map(|pile| pile.cards.len() as u8).sum();
+        let hidden_total: u8 = self.piles.iter().map(|pile| pile.hidden_count).sum();
+        52 - foundation_count - pile_visible - hidden_total
+    }
+}
+
+pub trait SolitaireCashBackend {
+    fn observe(&mut self, layout: &SolitaireCashLayout) -> Result<ObservedBoard, AdapterError>;
+
+    fn tap(&mut self, _point: Point) -> Result<(), AdapterError> {
+        Err(AdapterError::ExecutionError(
+            "backend does not support taps".into(),
+        ))
+    }
+
+    fn drag(&mut self, _from: Point, _to: Point) -> Result<(), AdapterError> {
+        Err(AdapterError::ExecutionError(
+            "backend does not support drags".into(),
+        ))
+    }
+
+    fn can_interact(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SolitaireCashLayout {
+    pub(crate) column_lefts: [f32; N_PILES as usize],
+    pub(crate) card_width: f32,
+    pub(crate) card_height: f32,
+    pub(crate) top_row_top: f32,
+    pub(crate) tableau_top: f32,
+    pub(crate) hidden_fan_y: f32,
+    pub(crate) visible_fan_y: f32,
+    submit_point: Point,
+    undo_point: Point,
+}
+
+impl Default for SolitaireCashLayout {
+    fn default() -> Self {
+        Self {
+            // Normalized from the supplied iPhone screenshots (1290 x 2796).
+            column_lefts: [
+                5.0 / 1290.0,
+                189.0 / 1290.0,
+                373.0 / 1290.0,
+                558.0 / 1290.0,
+                742.0 / 1290.0,
+                926.0 / 1290.0,
+                1110.0 / 1290.0,
+            ],
+            card_width: 174.0 / 1290.0,
+            card_height: 246.0 / 2796.0,
+            top_row_top: 572.0 / 2796.0,
+            tableau_top: 1009.0 / 2796.0,
+            hidden_fan_y: 35.0 / 2796.0,
+            visible_fan_y: 70.0 / 2796.0,
+            submit_point: Point::new(0.18, 0.903),
+            undo_point: Point::new(0.77, 0.903),
+        }
+    }
+}
+
+impl SolitaireCashLayout {
+    fn card_center(&self, column: usize, top: f32) -> Point {
+        Point::new(
+            self.column_lefts[column] + self.card_width / 2.0,
+            top + self.card_height / 2.0,
+        )
+    }
+
+    fn foundation_point(&self, suit: u8) -> Point {
+        self.card_center(suit as usize, self.top_row_top)
+    }
+
+    fn stock_point(&self) -> Point {
+        self.card_center(6, self.top_row_top)
+    }
+
+    fn waste_point(&self) -> Point {
+        self.card_center(4, self.top_row_top)
+    }
+
+    fn undo_point(&self) -> Point {
+        self.undo_point
+    }
+
+    pub fn submit_point(&self) -> Point {
+        self.submit_point
+    }
+
+    fn tableau_card_point(&self, pile: usize, hidden_count: u8, visible_index: usize) -> Point {
+        let top = self.tableau_top
+            + self.hidden_fan_y * hidden_count as f32
+            + self.visible_fan_y * visible_index as f32;
+        Point::new(
+            self.column_lefts[pile] + self.card_width / 2.0,
+            top + self.card_height * 0.32,
+        )
+    }
+
+    fn tableau_drop_point(&self, pile: usize, observed: &ObservedPile) -> Point {
+        if observed.cards.is_empty() {
+            self.card_center(pile, self.tableau_top)
+        } else {
+            self.tableau_card_point(pile, observed.hidden_count, observed.cards.len() - 1)
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SolitaireCashAdapter<B> {
+    backend: B,
+    layout: SolitaireCashLayout,
+    draw_step: u8,
+    scan_full_deck: bool,
+    settle_time: Duration,
+    scan_tap_delay: Duration,
+    max_deck_scan_taps: u8,
+    debug: bool,
+    last_observation: Option<ObservedBoard>,
+}
+
+impl<B> SolitaireCashAdapter<B> {
+    pub fn new(backend: B) -> Self {
+        Self {
+            backend,
+            layout: SolitaireCashLayout::default(),
+            draw_step: 3,
+            scan_full_deck: true,
+            settle_time: Duration::from_millis(500),
+            scan_tap_delay: Duration::from_millis(180),
+            max_deck_scan_taps: 64,
+            debug: false,
+            last_observation: None,
+        }
+    }
+
+    pub fn with_layout(mut self, layout: SolitaireCashLayout) -> Self {
+        self.layout = layout;
+        self
+    }
+
+    pub fn with_settle_time(mut self, settle_time: Duration) -> Self {
+        self.settle_time = settle_time;
+        self
+    }
+
+    pub fn with_scan_tap_delay(mut self, scan_tap_delay: Duration) -> Self {
+        self.scan_tap_delay = scan_tap_delay;
+        self
+    }
+
+    pub fn with_full_deck_scan(mut self, enabled: bool) -> Self {
+        self.scan_full_deck = enabled;
+        self
+    }
+
+    pub fn with_debug(mut self, debug: bool) -> Self {
+        self.debug = debug;
+        self
+    }
+
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+
+    pub fn backend_mut(&mut self) -> &mut B {
+        &mut self.backend
+    }
+}
+
+impl<B: SolitaireCashBackend> SolitaireCashAdapter<B> {
+    fn debug_log(&self, message: impl AsRef<str>) {
+        if self.debug {
+            eprintln!("[solitaire-cash] {}", message.as_ref());
+        }
+    }
+
+    fn describe_board(&self, board: &PartialBoard) -> String {
+        let pile_summary = board
+            .pile_cards
+            .iter()
+            .enumerate()
+            .map(|(idx, pile)| {
+                format!(
+                    "p{} hidden={} visible={}",
+                    idx + 1,
+                    board.hidden_counts[idx],
+                    pile.len()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "foundation={:?} waste_visible={} stock_count={} known_deck={} {pile_summary}",
+            board.foundation,
+            board.waste.len(),
+            board.stock_count,
+            board.known_deck_order.as_ref().map_or(0, |deck| deck.len()),
+        )
+    }
+
+    fn taps_to_cycle_start(total_deck_cards: u8, draw_cur: u8) -> u8 {
+        if total_deck_cards == 0 {
+            0
+        } else if draw_cur == 0 {
+            0
+        } else {
+            (total_deck_cards - draw_cur).div_ceil(DRAW_STEP) + 1
+        }
+    }
+
+    fn visible_waste_len_for_draw_cur(draw_cur: u8) -> u8 {
+        draw_cur.min(DRAW_STEP)
+    }
+
+    fn infer_stock_count(
+        &self,
+        total_deck_cards: u8,
+        observed_waste: &[Card],
+        taps_to_cycle_start: u8,
+        known_deck_order: Option<&ArrayVec<Card, { N_DECK_CARDS as usize }>>,
+    ) -> Result<u8, AdapterError> {
+        for draw_cur in 0..=total_deck_cards {
+            let expected_taps = Self::taps_to_cycle_start(total_deck_cards, draw_cur);
+            let expected_visible = Self::visible_waste_len_for_draw_cur(draw_cur) as usize;
+            let waste_matches = known_deck_order.is_none_or(|deck_order| {
+                let draw_cur = draw_cur as usize;
+                let start = draw_cur.saturating_sub(expected_visible);
+                deck_order
+                    .get(start..draw_cur)
+                    .is_some_and(|cards| cards == observed_waste)
+            });
+            if expected_taps == taps_to_cycle_start
+                && expected_visible == observed_waste.len()
+                && waste_matches
+            {
+                return Ok(total_deck_cards - draw_cur);
+            }
+        }
+
+        Err(AdapterError::RecognitionError(format!(
+            "could not infer stock count from total_deck_cards={total_deck_cards}, observed_waste_len={}, taps_to_cycle_start={taps_to_cycle_start}",
+            observed_waste.len()
+        )))
+    }
+
+    fn tap_and_wait(&mut self, point: Point, delay: Duration) -> Result<(), AdapterError> {
+        self.backend.tap(point)?;
+        thread::sleep(delay);
+        Ok(())
+    }
+
+    fn observe(&mut self) -> Result<ObservedBoard, AdapterError> {
+        self.backend.observe(&self.layout)
+    }
+
+    fn scan_known_deck_order(
+        &mut self,
+        original: &ObservedBoard,
+    ) -> Result<(Option<ArrayVec<Card, { N_DECK_CARDS as usize }>>, u8), AdapterError> {
+        if !self.scan_full_deck || !self.backend.can_interact() {
+            self.debug_log("full deck scan skipped");
+            return Ok((None, 0));
+        }
+
+        let total_deck_cards = original.total_deck_cards();
+        if total_deck_cards == 0 {
+            return Ok((Some(ArrayVec::new()), 0));
+        }
+
+        let mut working = original.clone();
+        let mut taps_used = 0u8;
+        let stock_point = self.layout.stock_point();
+        let undo_point = self.layout.undo_point();
+        self.debug_log(format!(
+            "starting deck scan: waste_visible={} stock_present={} total_deck_cards={}",
+            working.waste.len(),
+            working.stock_present,
+            total_deck_cards
+        ));
+
+        while !(working.stock_present && working.waste.is_empty()) {
+            if taps_used >= self.max_deck_scan_taps {
+                return Err(AdapterError::RecognitionError(
+                    "deck scan exceeded tap budget before reset".into(),
+                ));
+            }
+            self.tap_and_wait(stock_point, self.scan_tap_delay)?;
+            taps_used += 1;
+            working = self.observe()?;
+            self.debug_log(format!(
+                "deck scan reset tap {}: waste_visible={} stock_present={}",
+                taps_used,
+                working.waste.len(),
+                working.stock_present
+            ));
+        }
+
+        let taps_to_cycle_start = taps_used;
+        let mut known_deck_order = ArrayVec::<Card, { N_DECK_CARDS as usize }>::new();
+        while working.stock_present {
+            if taps_used >= self.max_deck_scan_taps {
+                return Err(AdapterError::RecognitionError(
+                    "deck scan exceeded tap budget during stock traversal".into(),
+                ));
+            }
+            self.tap_and_wait(stock_point, self.scan_tap_delay)?;
+            taps_used += 1;
+            working = self.observe()?;
+            let revealed = usize::from(
+                self.draw_step
+                    .min(total_deck_cards.saturating_sub(known_deck_order.len() as u8)),
+            );
+            let newly_visible_start = working.waste.len().saturating_sub(revealed);
+            known_deck_order
+                .try_extend_from_slice(&working.waste[newly_visible_start..])
+                .map_err(|_| {
+                    AdapterError::RecognitionError(
+                        "detected more deck cards than fit in a Klondike stock".into(),
+                    )
+                })?;
+            self.debug_log(format!(
+                "deck scan reveal tap {}: appended={} total_known={} waste_visible={} stock_present={}",
+                taps_used,
+                revealed.min(working.waste.len()),
+                known_deck_order.len(),
+                working.waste.len(),
+                working.stock_present
+            ));
+        }
+
+        if known_deck_order.len() as u8 != total_deck_cards {
+            return Err(AdapterError::RecognitionError(format!(
+                "deck scan captured {} cards, expected {}",
+                known_deck_order.len(),
+                total_deck_cards
+            )));
+        }
+
+        for _ in 0..taps_used {
+            self.tap_and_wait(undo_point, self.scan_tap_delay)?;
+        }
+        self.debug_log(format!("deck scan restored using {} undo taps", taps_used));
+
+        let restored = self.observe()?;
+        if restored.foundation != original.foundation
+            || restored.piles != original.piles
+            || restored.stock_present != original.stock_present
+            || restored.waste.len() != original.waste.len()
+        {
+            return Err(AdapterError::RecognitionError(
+                "failed to restore board after deck scan".into(),
+            ));
+        }
+
+        Ok((Some(known_deck_order), taps_to_cycle_start))
+    }
+
+    fn source_point_for_move(
+        &self,
+        observed: &ObservedBoard,
+        m: &StandardMove,
+    ) -> Result<Point, AdapterError> {
+        match m.from {
+            Pos::Deck => Ok(self.layout.waste_point()),
+            Pos::Pile(from) => {
+                let pile = &observed.piles[from as usize];
+                let card_index = pile
+                    .cards
+                    .iter()
+                    .position(|card| *card == m.card)
+                    .ok_or_else(|| {
+                        AdapterError::ExecutionError(format!(
+                            "card {m} not found in source pile {}",
+                            from + 1
+                        ))
+                    })?;
+                Ok(self
+                    .layout
+                    .tableau_card_point(from as usize, pile.hidden_count, card_index))
+            }
+            Pos::Stack(suit) => Ok(self.layout.foundation_point(suit)),
+        }
+    }
+
+    fn destination_point_for_move(
+        &self,
+        observed: &ObservedBoard,
+        m: &StandardMove,
+    ) -> Result<Point, AdapterError> {
+        match m.to {
+            Pos::Deck => Ok(self.layout.stock_point()),
+            Pos::Pile(to) => Ok(self
+                .layout
+                .tableau_drop_point(to as usize, &observed.piles[to as usize])),
+            Pos::Stack(suit) => Ok(self.layout.foundation_point(suit)),
+        }
+    }
+}
+
+impl<B: SolitaireCashBackend> ScreenAdapter for SolitaireCashAdapter<B> {
+    fn read_board(&mut self) -> Result<PartialBoard, AdapterError> {
+        self.debug_log("capturing board");
+        let observed = self.observe()?;
+        let (known_deck_order, taps_to_cycle_start) = self.scan_known_deck_order(&observed)?;
+        let total_deck_cards = observed.total_deck_cards();
+        let stock_count = if let Some(_) = known_deck_order {
+            self.infer_stock_count(
+                total_deck_cards,
+                observed.waste.as_slice(),
+                taps_to_cycle_start,
+                known_deck_order.as_ref(),
+            )?
+        } else {
+            observed.stock_count
+        };
+        let waste = if let Some(deck_order) = &known_deck_order {
+            let draw_cur = total_deck_cards.saturating_sub(stock_count) as usize;
+            let visible_len = observed.waste.len();
+            let start = draw_cur.saturating_sub(visible_len);
+            deck_order[start..draw_cur].iter().copied().collect()
+        } else {
+            observed.waste.clone()
+        };
+
+        let board = PartialBoard {
+            pile_cards: core::array::from_fn(|idx| observed.piles[idx].cards.clone()),
+            hidden_counts: core::array::from_fn(|idx| observed.piles[idx].hidden_count),
+            foundation: observed.foundation,
+            waste,
+            known_deck_order,
+            stock_count,
+            draw_step: self.draw_step,
+        };
+
+        board.validate().map_err(|err| {
+            AdapterError::RecognitionError(format!("recognized invalid Solitaire Cash board: {err:?}"))
+        })?;
+
+        self.debug_log(self.describe_board(&board));
+        self.last_observation = Some(observed);
+        Ok(board)
+    }
+
+    fn can_execute(&self) -> bool {
+        self.backend.can_interact()
+    }
+
+    fn execute_move(&mut self, m: &StandardMove) -> Result<(), AdapterError> {
+        if !self.backend.can_interact() {
+            return Err(AdapterError::ExecutionError(
+                "backend does not support move execution".into(),
+            ));
+        }
+
+        if *m == StandardMove::DRAW_NEXT {
+            self.debug_log("executing draw");
+            return self.backend.tap(self.layout.stock_point());
+        }
+
+        let observed = self
+            .last_observation
+            .as_ref()
+            .ok_or_else(|| AdapterError::ExecutionError("no cached board for move execution".into()))?;
+
+        let from = self.source_point_for_move(observed, m)?;
+        let to = self.destination_point_for_move(observed, m)?;
+        self.debug_log(format!(
+            "executing move {m} from ({:.3},{:.3}) to ({:.3},{:.3})",
+            from.x, from.y, to.x, to.y
+        ));
+        self.backend.drag(from, to)
+    }
+
+    fn name(&self) -> &str {
+        "solitaire-cash"
+    }
+
+    fn settle_time(&self) -> Duration {
+        self.settle_time
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lonelybot::partial::parse_card;
+
+    #[derive(Debug, Clone)]
+    struct MockBackend {
+        foundation: [u8; N_SUITS as usize],
+        piles: [ObservedPile; N_PILES as usize],
+        deck_order: ArrayVec<Card, { N_DECK_CARDS as usize }>,
+        draw_cur: u8,
+        history: Vec<u8>,
+        taps: Vec<Point>,
+        drags: Vec<(Point, Point)>,
+        interactive: bool,
+    }
+
+    impl MockBackend {
+        fn new(deck: &[&str], draw_cur: u8, interactive: bool) -> Self {
+            let mut deck_order = ArrayVec::<Card, { N_DECK_CARDS as usize }>::new();
+            for card in deck {
+                deck_order.push(parse_card(card).unwrap());
+            }
+            Self {
+                foundation: [0; 4],
+                piles: core::array::from_fn(|_| ObservedPile {
+                    hidden_count: 0,
+                    cards: PileVec::new(),
+                }),
+                deck_order,
+                draw_cur,
+                history: Vec::new(),
+                taps: Vec::new(),
+                drags: Vec::new(),
+                interactive,
+            }
+        }
+
+        fn stock_tap_count(&self, layout: &SolitaireCashLayout) -> usize {
+            self.taps
+                .iter()
+                .filter(|tap| **tap == layout.stock_point())
+                .count()
+        }
+
+        fn undo_tap_count(&self, layout: &SolitaireCashLayout) -> usize {
+            self.taps
+                .iter()
+                .filter(|tap| **tap == layout.undo_point())
+                .count()
+        }
+    }
+
+    impl SolitaireCashBackend for MockBackend {
+        fn observe(&mut self, _layout: &SolitaireCashLayout) -> Result<ObservedBoard, AdapterError> {
+            let start = self.draw_cur.saturating_sub(3) as usize;
+            let end = self.draw_cur as usize;
+            let waste = self.deck_order[start..end].iter().copied().collect();
+
+            Ok(ObservedBoard {
+                foundation: self.foundation,
+                piles: self.piles.clone(),
+                waste,
+                stock_count: self.deck_order.len() as u8 - self.draw_cur,
+                stock_present: self.draw_cur < self.deck_order.len() as u8,
+            })
+        }
+
+        fn tap(&mut self, point: Point) -> Result<(), AdapterError> {
+            self.taps.push(point);
+            if !self.interactive {
+                return Err(AdapterError::ExecutionError("mock backend is read-only".into()));
+            }
+
+            let layout = SolitaireCashLayout::default();
+            if point == layout.stock_point() {
+                self.history.push(self.draw_cur);
+                let len = self.deck_order.len() as u8;
+                self.draw_cur = if self.draw_cur >= len {
+                    0
+                } else {
+                    (self.draw_cur + 3).min(len)
+                };
+                Ok(())
+            } else if point == layout.undo_point() {
+                self.draw_cur = self
+                    .history
+                    .pop()
+                    .ok_or_else(|| AdapterError::ExecutionError("nothing to undo".into()))?;
+                Ok(())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn drag(&mut self, from: Point, to: Point) -> Result<(), AdapterError> {
+            self.drags.push((from, to));
+            if self.interactive {
+                Ok(())
+            } else {
+                Err(AdapterError::ExecutionError("mock backend is read-only".into()))
+            }
+        }
+
+        fn can_interact(&self) -> bool {
+            self.interactive
+        }
+    }
+
+    #[test]
+    fn read_board_scans_full_draw_three_deck_and_restores_state() {
+        let mut backend =
+            MockBackend::new(&["QH", "QD", "QC", "QS", "KH", "KD", "KC", "KS"], 5, true);
+        backend.foundation = [11; 4];
+        let mut adapter = SolitaireCashAdapter::new(backend)
+            .with_settle_time(Duration::ZERO)
+            .with_scan_tap_delay(Duration::ZERO);
+
+        let board = adapter.read_board().unwrap();
+
+        let known = board.known_deck_order.expect("expected full deck order");
+        let expected: ArrayVec<Card, { N_DECK_CARDS as usize }> = [
+            "QH", "QD", "QC", "QS", "KH", "KD", "KC", "KS",
+        ]
+        .into_iter()
+        .map(|card| parse_card(card).unwrap())
+        .collect();
+
+        assert_eq!(board.stock_count, 3);
+        assert_eq!(board.waste.len(), 3);
+        assert_eq!(known, expected);
+        assert_eq!(adapter.backend().draw_cur, 5);
+        assert_eq!(adapter.backend().stock_tap_count(&adapter.layout), 5);
+        assert_eq!(adapter.backend().undo_tap_count(&adapter.layout), 5);
+    }
+
+    #[test]
+    fn read_board_without_interaction_returns_partial_view_only() {
+        let mut backend = MockBackend::new(&["KH", "KD", "KC", "QS", "KS"], 3, false);
+        backend.foundation = [12, 12, 12, 11];
+        let mut adapter = SolitaireCashAdapter::new(backend)
+            .with_full_deck_scan(true)
+            .with_settle_time(Duration::ZERO)
+            .with_scan_tap_delay(Duration::ZERO);
+
+        let board = adapter.read_board().unwrap();
+
+        assert!(board.known_deck_order.is_none());
+        assert_eq!(board.stock_count, 2);
+        assert_eq!(board.waste.len(), 3);
+    }
+}
