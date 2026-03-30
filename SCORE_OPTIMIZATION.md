@@ -56,17 +56,16 @@ The desired high-level flow should be:
 
 ## Recommended Fallback Objective
 
-Foundation count is a good primary signal, but it should be treated as the start of the evaluation function, not necessarily the entire definition of "best".
+Use **foundation card count measured at rollout terminal states** as the reward signal.
 
-Recommended ranking:
+Each rollout already plays to a terminal state (win or dead end). Instead of recording only binary win/loss, read `stack.len()` at the terminal state and use that as the rollout reward. This naturally handles the "foundation count alone can be shortsighted" problem: if stacking a card early leads to a dead end at 12 foundation cards, but not stacking it leads to a dead end at 30, the terminal-state measurement captures that difference without any heuristic tuning.
 
-1. Exact win found
-2. Higher foundation count
-3. More hidden cards revealed
-4. Better mobility / more promising resulting position
-5. Shorter / cleaner line as a tiebreaker
+This is sufficient for the first implementation. Additional signals (hidden cards revealed, mobility, line length) can be added later as tiebreakers if needed, but terminal-state foundation count is the right starting point because:
 
-For the first implementation, using **foundation card count** as the primary rollout reward is a good and practical step. It is much better than binary win/loss, and it matches the current architecture well.
+- It requires minimal code changes (read `stack.len()` at rollout end).
+- It naturally penalizes trap positions via the rollout playing them out.
+- It avoids fragile weight tuning between multiple heuristic signals.
+- It is much better than binary win/loss, and it matches the current architecture well.
 
 ## What Already Exists In The Repo
 
@@ -225,10 +224,7 @@ Safer approach:
 
 Foundation progress is a strong signal, but Klondike has traps where pushing cards up too early can hurt future mobility.
 
-Mitigation:
-
-- keep foundation count as the first scoring upgrade,
-- leave room for second-stage tie breakers later.
+Mitigation: measure foundation count at rollout **terminal states**, not mid-search. Rollouts already play to a dead end or a win. If an early stack move creates a trap, the rollout will dead-end at a low foundation count, naturally penalizing that path. This avoids the need for separate heuristics to detect traps. Additional tiebreaker signals (hidden cards revealed, mobility) can be added later if terminal-state foundation count proves insufficient.
 
 ### Main risk: output quality vs. search cost
 
@@ -239,11 +235,11 @@ This is still worth doing, but it should be acknowledged as a scope increase.
 ## Suggested Implementation Order
 
 1. Keep exact solve as the first attempt from the starting state.
-2. Replace binary rollout reward with foundation count.
+2. Replace binary rollout reward with foundation count measured at rollout terminal states.
 3. Return the best fallback line found, not just a local best move.
 4. Convert fallback output into `StandardMove` form.
 5. Benchmark on easy, medium, and hard seeds.
-6. Add secondary fallback heuristics only if foundation count alone is not good enough.
+6. Add secondary tiebreaker signals (hidden cards revealed, mobility) only if terminal-state foundation count alone is not good enough.
 
 ## Success Criteria
 

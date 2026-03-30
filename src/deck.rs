@@ -211,7 +211,7 @@ impl Deck {
     #[must_use]
     pub fn compute_mask(&self, filter: bool) -> u64 {
         let mut mask: u64 = 0;
-        self.iter_callback(filter, |_, card| -> ControlFlow<()> {
+        let _ = self.iter_callback(filter, |_, card| -> ControlFlow<()> {
             mask |= card.mask();
             ControlFlow::Continue(())
         });

@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(grep -E \"\\\\.rs$\")",
-      "Bash(wc -l /Users/kase/Klondy-bot/src/*.rs)"
+      "Bash(wc -l /Users/kase/Klondy-bot/src/*.rs)",
+      "Read(//Users/kase/.claude/plans/**)",
+      "Bash(cargo build:*)",
+      "Bash(cargo run:*)",
+      "Bash(cargo clean:*)"
     ]
   }
 }

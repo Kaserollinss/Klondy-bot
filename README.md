@@ -277,45 +277,62 @@ There are currently 5 types of move:
 - PS ``card``: Moving the ``card`` from the tableau to the stack (potentially also do a reveal)
 
 ### HOP solver
-In this mode it will try to solve the game with no undo. (actually it is using something more like MCTS not HOP)
+This mode first attempts an exact solve (with a budgeted search). If the exact solver finds a solution, it returns it immediately. If the exact solver proves the game is unsolvable, it reports that. Otherwise, it falls back to MCTS-guided search using foundation-count scoring to find the best possible line.
+
+Output is in standard human-followable moves (StandardMove format).
+
 ```sh
 lonecli hop [seed_type] [seed] [draw_step]
 ```
 
-Example run
+Example run (exact solve succeeds)
+```sh
+lonecli hop default 12 3
+```
+
+Example output
+```
+Solved (exact)
+A♦:5▸♦, 5♠:R, A♠:5▸♠, ...
+```
+
+Example run (falls back to MCTS, wins)
 ```sh
 lonecli hop default 0 3
 ```
 
 Example output
 ```
-R Q♠,
-R Q♦,
-DP 4♣,
-...
-Solved
+Exact solve exhausted budget, falling back to MCTS...
+R Q♠, R Q♦, DP 4♣, ...
+Solved (MCTS)
 ```
 
-Example run
+Example run (best effort fallback)
 ```sh
 lonecli hop default 6 3
 ```
 
 Example output
 ```
-DS A♠,
-DP J♦,
-DS 2♠,
-...
-Lost
+Exact solve exhausted budget, falling back to MCTS...
+DS A♠, DP J♦, DS 2♠, ...
+Best effort: 12/52 foundation cards
 ```
+
+The three possible outcomes are:
+- **Solved (exact)**: The exact solver found a winning line within its budget.
+- **Solved (MCTS)**: The MCTS fallback found a winning line.
+- **Proved unsolvable**: The exact solver exhausted the full search space and proved no win exists.
+- **Best effort**: No full solution was found. The output is the best partial line discovered, scored by foundation card count at terminal states.
 
 ### HOP loop
 ```sh
 lonecli hop-loop [seed_type] [seed] [draw_step]
 ```
 
-- In this mode it will try to solve the game with no undo from the given seed and moving on to the next seed
+In this mode it will try to solve games sequentially starting from the given seed, moving on to seed+1, seed+2, etc. Uses the same exact-first-then-MCTS-fallback pipeline as `hop`.
+
 Example run
 ```sh
 lonecli hop-loop default 0 3

@@ -16,6 +16,7 @@ struct HOPSolverCallback<'a, T: TerminateSignal> {
     result: SearchResult,
     limit: usize,
     n_visit: usize,
+    max_foundation: u8,
 }
 
 impl<T: TerminateSignal> Callback for HOPSolverCallback<'_, T> {
@@ -23,12 +24,19 @@ impl<T: TerminateSignal> Callback for HOPSolverCallback<'_, T> {
 
     fn on_win(&mut self, _: &Solitaire) -> Control {
         self.result = SearchResult::Solved;
+        self.max_foundation = 52;
         Control::Halt
     }
 
     fn on_visit(&mut self, g: &Solitaire, _: Encode) -> Control {
+        let f = g.get_stack().len();
+        if f > self.max_foundation {
+            self.max_foundation = f;
+        }
+
         if g.is_sure_win() {
             self.result = SearchResult::Solved;
+            self.max_foundation = 52;
             return Control::Halt;
         }
 
@@ -49,25 +57,25 @@ impl<T: TerminateSignal> Callback for HOPSolverCallback<'_, T> {
 
 #[derive(Default, Clone, Copy)]
 pub struct HopResult {
-    pub wins: usize,
+    pub total_score: usize,
     pub skips: usize,
     pub played: usize,
 }
 
 const SURE_WIN: HopResult = HopResult {
-    wins: !0,
+    total_score: !0,
     skips: 0,
     played: !0,
 };
 
 const SURE_LOSE: HopResult = HopResult {
-    wins: 0,
+    total_score: 0,
     skips: !0,
     played: !0,
 };
 
 const SKIPPED: HopResult = HopResult {
-    wins: 0,
+    total_score: 0,
     skips: 1,
     played: 1,
 };
@@ -77,7 +85,7 @@ impl Add for HopResult {
 
     fn add(self, rhs: Self) -> Self {
         Self {
-            wins: self.wins + rhs.wins,
+            total_score: self.total_score + rhs.total_score,
             skips: self.skips + rhs.skips,
             played: self.played + rhs.played,
         }
@@ -86,7 +94,7 @@ impl Add for HopResult {
 
 impl AddAssign for HopResult {
     fn add_assign(&mut self, rhs: Self) {
-        self.wins += rhs.wins;
+        self.total_score += rhs.total_score;
         self.skips += rhs.skips;
         self.played += rhs.played;
     }
@@ -101,7 +109,7 @@ pub fn hop_solve_game<R: RngCore, T: TerminateSignal>(
     sign: &T,
     prune_info: &FullPruner,
 ) -> HopResult {
-    let mut total_wins = 0;
+    let mut total_score = 0;
     let mut total_skips = 0;
     let mut total_played = 0;
 
@@ -132,6 +140,7 @@ pub fn hop_solve_game<R: RngCore, T: TerminateSignal>(
             result: SearchResult::Unsolvable,
             limit,
             n_visit: 0,
+            max_foundation: 0,
         };
         tp.clear();
         traverse(&mut gg, new_prune_info, &mut tp, &mut callback);
@@ -141,13 +150,20 @@ pub fn hop_solve_game<R: RngCore, T: TerminateSignal>(
         total_played += 1;
         let result = callback.result;
         match result {
-            SearchResult::Solved => total_wins += 1,
-            SearchResult::Terminated => total_skips += 1,
-            _ => {}
+            SearchResult::Solved => {
+                total_score += 52;
+            }
+            SearchResult::Terminated => {
+                total_skips += 1;
+                total_score += callback.max_foundation as usize;
+            }
+            _ => {
+                total_score += callback.max_foundation as usize;
+            }
         }
     }
     HopResult {
-        wins: total_wins,
+        total_score,
         skips: total_skips,
         played: total_played,
     }

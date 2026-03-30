@@ -130,7 +130,7 @@ pub fn pick_moves<R: RngCore, T: TerminateSignal>(
         // here pick the best :)
         let best = res
             .iter()
-            .map(|x| pot_fn(x.wins, x.played, n))
+            .map(|x| pot_fn(x.total_score, x.played, n))
             .enumerate()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .map(|x| x.0)
