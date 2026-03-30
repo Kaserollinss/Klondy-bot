@@ -79,4 +79,16 @@ impl Stack {
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
+
+    /// Construct a `Stack` from per-suit rank counts (0–13).
+    /// `counts[i]` = number of cards stacked for suit `i`.
+    #[must_use]
+    pub const fn from_counts(counts: [u8; N_SUITS as usize]) -> Self {
+        Self(
+            counts[0] as u16
+                | (counts[1] as u16) << 4
+                | (counts[2] as u16) << 8
+                | (counts[3] as u16) << 12,
+        )
+    }
 }

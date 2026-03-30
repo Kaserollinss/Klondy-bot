@@ -46,6 +46,27 @@ impl Deck {
         }
     }
 
+    /// Construct a deck from a variable-length card slice for mid-game states.
+    /// `cards[0..draw_cur]` = waste, `cards[draw_cur..]` = stock.
+    #[must_use]
+    pub fn from_cards(cards: &[Card], draw_cur: u8, draw_step: NonZeroU8) -> Self {
+        let mut deck = ArrayVec::new();
+        deck.try_extend_from_slice(cards).unwrap();
+        let mut map = [!0u8; N_CARDS as usize];
+        #[allow(clippy::cast_possible_truncation)]
+        for (i, c) in deck.iter().enumerate() {
+            map[c.mask_index() as usize] = i as u8;
+        }
+
+        Self {
+            deck,
+            draw_step,
+            draw_cur,
+            mask: full_mask(cards.len() as u8) as u32,
+            map,
+        }
+    }
+
     #[must_use]
     pub const fn draw_step(&self) -> NonZeroU8 {
         self.draw_step

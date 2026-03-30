@@ -1,0 +1,10 @@
+[package]
+name = "loneadapter"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+lonelybot = { path = "../" }
+rand = { version = "0.9.0", features = ["small_rng"] }
+thiserror = "2"

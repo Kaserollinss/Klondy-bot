@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), no_std)]
 pub mod card;
+pub mod partial;
 pub mod convert;
 pub mod deck;
 pub mod engine;

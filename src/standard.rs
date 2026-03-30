@@ -95,6 +95,22 @@ impl StandardSolitaire {
         }
     }
 
+    /// Construct from pre-built components (for partial board reconstruction).
+    #[must_use]
+    pub fn from_parts(
+        hidden_piles: [HiddenVec; N_PILES as usize],
+        piles: [PileVec; N_PILES as usize],
+        deck: Deck,
+        final_stack: Stack,
+    ) -> Self {
+        Self {
+            hidden_piles,
+            piles,
+            deck,
+            final_stack,
+        }
+    }
+
     #[must_use]
     pub const fn is_win(&self) -> bool {
         self.final_stack.is_full()

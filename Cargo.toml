@@ -1,4 +1,4 @@
-workspace = { members = ["lonecli"] }
+workspace = { members = ["lonecli", "loneadapter"] }
 [package]
 name = "lonelybot"
 version = "0.2.3"

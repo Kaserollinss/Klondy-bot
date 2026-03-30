@@ -52,7 +52,7 @@ impl Hidden {
     }
 
     #[must_use]
-    pub(crate) fn from_piles(
+    pub fn from_piles(
         piles: &[HiddenVec; N_PILES as usize],
         top: &[Option<Card>; N_PILES as usize],
     ) -> Self {
