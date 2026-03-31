@@ -68,9 +68,9 @@ impl<A: ScreenAdapter> GameDriver<A> {
     pub fn step(&mut self) -> Result<String, AdapterError> {
         // 1. Read board
         let board = self.adapter.read_board()?;
-        board.validate().map_err(|e| {
-            AdapterError::RecognitionError(format!("invalid board: {e:?}"))
-        })?;
+        board
+            .validate()
+            .map_err(|e| AdapterError::RecognitionError(format!("invalid board: {e:?}")))?;
 
         // 2. Build solitaire state
         let solitaire = board.to_solitaire(&mut self.rng);
@@ -94,9 +94,8 @@ impl<A: ScreenAdapter> GameDriver<A> {
 
         // 4. Convert to standard moves
         let mut std_copy = std_game.clone();
-        let std_moves = convert_moves(&mut std_copy, &moves).map_err(|_| {
-            AdapterError::RecognitionError("failed to convert moves".into())
-        })?;
+        let std_moves = convert_moves(&mut std_copy, &moves)
+            .map_err(|_| AdapterError::RecognitionError("failed to convert moves".into()))?;
 
         if std_moves.is_empty() {
             return Err(AdapterError::GameOver);

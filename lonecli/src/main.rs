@@ -144,7 +144,8 @@ fn solve_game(seed: &Seed, draw_step: NonZeroU8, verbose: bool) -> SolveOutput {
     // Phase 1: Try exact solve with budget
     let mut exact_game = Solitaire::new(&cards, draw_step);
     let budget_signal = BudgetedTerminateSignal::new(EXACT_BUDGET);
-    let (result, history) = solve_with_tracking(&mut exact_game, &EmptySearchStats {}, &budget_signal);
+    let (result, history) =
+        solve_with_tracking(&mut exact_game, &EmptySearchStats {}, &budget_signal);
 
     match result {
         SearchResult::Solved => {
@@ -330,13 +331,16 @@ fn run_solitaire_cash_screen(args: &ScreenSolitaireCashArgs) -> Result<(), Adapt
             args.assets.display()
         );
         if let Some(dir) = &args.debug_dir {
-            eprintln!("[solitaire-cash] debug screenshots will be copied to {}", dir.display());
+            eprintln!(
+                "[solitaire-cash] debug images will be organized into folders under {}",
+                dir.display()
+            );
         }
     }
 
     let capture = MacScreenCapture::new(region).with_debug(debug.clone());
-    let recognizer = PapayaSolitaireCashRecognizer::from_asset_dir(&args.assets)?
-        .with_debug(debug.clone());
+    let recognizer =
+        PapayaSolitaireCashRecognizer::from_asset_dir(&args.assets)?.with_debug(debug.clone());
     let backend = ScreenshotVisionBackend::new(capture, recognizer, region)
         .with_debug(debug.clone())
         .with_mouse(MacNativeMouse::new());
@@ -348,8 +352,8 @@ fn run_solitaire_cash_screen(args: &ScreenSolitaireCashArgs) -> Result<(), Adapt
         ScreenMode::Advisor => DriverMode::Advisor,
         ScreenMode::Autoplay => DriverMode::AutoPlay,
     };
-    let mut driver = GameDriver::new(adapter, mode)
-        .with_mcts_params(args.mcts_iterations, args.mcts_limit);
+    let mut driver =
+        GameDriver::new(adapter, mode).with_mcts_params(args.mcts_iterations, args.mcts_limit);
 
     if args.loop_mode || matches!(args.mode, ScreenMode::Autoplay) {
         driver.run()?;

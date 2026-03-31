@@ -57,7 +57,9 @@ impl TemplateLibrary {
     }
 
     fn load_rank_templates(rank_dir: &Path) -> Result<Vec<GlyphTemplate>, AdapterError> {
-        let labels = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
+        let labels = [
+            "A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K",
+        ];
         let mut templates = Vec::with_capacity(labels.len());
         let mut missing = Vec::new();
         for label in labels {
@@ -86,10 +88,22 @@ impl TemplateLibrary {
         suit_dir: &Path,
     ) -> Result<Vec<GlyphTemplate>, AdapterError> {
         let candidates = [
-            ("C", vec![suit_dir.join("C.png"), asset_dir.join("Club.png")]),
-            ("D", vec![suit_dir.join("D.png"), asset_dir.join("Diamond.png")]),
-            ("H", vec![suit_dir.join("H.png"), asset_dir.join("Heart.png")]),
-            ("S", vec![suit_dir.join("S.png"), asset_dir.join("Spade.png")]),
+            (
+                "C",
+                vec![suit_dir.join("C.png"), asset_dir.join("Club.png")],
+            ),
+            (
+                "D",
+                vec![suit_dir.join("D.png"), asset_dir.join("Diamond.png")],
+            ),
+            (
+                "H",
+                vec![suit_dir.join("H.png"), asset_dir.join("Heart.png")],
+            ),
+            (
+                "S",
+                vec![suit_dir.join("S.png"), asset_dir.join("Spade.png")],
+            ),
         ];
         let mut templates = Vec::with_capacity(candidates.len());
         let mut missing = Vec::new();
@@ -180,14 +194,8 @@ fn prepare_mask(image: &GrayImage, size: (u32, u32)) -> Option<PreparedMask> {
         Luma([u8::from(px <= threshold)])
     });
     let bounds = largest_component_bounds(&binary)?;
-    let cropped = image::imageops::crop_imm(
-        &binary,
-        bounds.0,
-        bounds.1,
-        bounds.2,
-        bounds.3,
-    )
-    .to_image();
+    let cropped =
+        image::imageops::crop_imm(&binary, bounds.0, bounds.1, bounds.2, bounds.3).to_image();
     let resized = image::imageops::resize(&cropped, size.0, size.1, FilterType::Nearest);
     Some(PreparedMask {
         mask: resized
@@ -280,12 +288,7 @@ fn largest_component_bounds(binary: &GrayImage) -> Option<(u32, u32, u32, u32)> 
                 min_y = min_y.min(cy);
                 max_x = max_x.max(cx);
                 max_y = max_y.max(cy);
-                for (nx, ny) in [
-                    (cx + 1, cy),
-                    (cx - 1, cy),
-                    (cx, cy + 1),
-                    (cx, cy - 1),
-                ] {
+                for (nx, ny) in [(cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)] {
                     if nx < 0 || ny < 0 || nx >= width || ny >= height {
                         continue;
                     }
@@ -304,7 +307,10 @@ fn largest_component_bounds(binary: &GrayImage) -> Option<(u32, u32, u32, u32)> 
                 (max_x - min_x + 1) as u32,
                 (max_y - min_y + 1) as u32,
             );
-            if best.as_ref().is_none_or(|current: &(usize, u32, u32, u32, u32)| candidate.0 > current.0) {
+            if best
+                .as_ref()
+                .is_none_or(|current: &(usize, u32, u32, u32, u32)| candidate.0 > current.0)
+            {
                 best = Some(candidate);
             }
         }
@@ -316,8 +322,8 @@ fn largest_component_bounds(binary: &GrayImage) -> Option<(u32, u32, u32, u32)> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use image::{ImageBuffer, Luma};
+    use std::fs;
 
     fn make_mask_image(width: u32, height: u32, points: &[(u32, u32)]) -> GrayImage {
         ImageBuffer::from_fn(width, height, |x, y| {
@@ -351,7 +357,9 @@ mod tests {
         fs::create_dir_all(&rank_dir).unwrap();
         fs::create_dir_all(&suit_dir).unwrap();
 
-        let labels = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
+        let labels = [
+            "A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K",
+        ];
         for label in labels {
             let image = if label == "A" {
                 make_mask_image(12, 12, &[(1, 1), (1, 2), (2, 1), (2, 2)])
@@ -376,15 +384,25 @@ mod tests {
             .match_rank(&make_mask_image(12, 12, &[(1, 1), (1, 2), (2, 1), (2, 2)]))
             .unwrap();
         assert_eq!(
-            rank_report.candidates.first().map(|candidate| candidate.label.as_str()),
+            rank_report
+                .candidates
+                .first()
+                .map(|candidate| candidate.label.as_str()),
             Some("A")
         );
 
         let suit_report = library
-            .match_suit(&make_mask_image(12, 12, &[(8, 1), (9, 1), (9, 2), (8, 3), (9, 3)]))
+            .match_suit(&make_mask_image(
+                12,
+                12,
+                &[(8, 1), (9, 1), (9, 2), (8, 3), (9, 3)],
+            ))
             .unwrap();
         assert_eq!(
-            suit_report.candidates.first().map(|candidate| candidate.label.as_str()),
+            suit_report
+                .candidates
+                .first()
+                .map(|candidate| candidate.label.as_str()),
             Some("S")
         );
 

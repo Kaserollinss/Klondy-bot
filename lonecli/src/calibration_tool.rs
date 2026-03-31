@@ -170,7 +170,12 @@ impl CalibrationSession {
                     })
                     .collect(),
             },
-            slots: preview.report.slots.iter().map(Self::slot_summary).collect(),
+            slots: preview
+                .report
+                .slots
+                .iter()
+                .map(Self::slot_summary)
+                .collect(),
             control_points: ControlPoints {
                 stock_tap_point: request.calibration.layout.stock_tap_point,
                 submit_point: request.calibration.layout.submit_point,
@@ -313,15 +318,19 @@ fn open_browser(url: &str) -> Result<(), AdapterError> {
     }
 }
 
-fn handle_connection(mut stream: TcpStream, session: &Arc<CalibrationSession>) -> Result<(), AdapterError> {
+fn handle_connection(
+    mut stream: TcpStream,
+    session: &Arc<CalibrationSession>,
+) -> Result<(), AdapterError> {
     let request = read_http_request(&mut stream)?;
     let response = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") => HttpResponse::html(CALIBRATOR_HTML.as_bytes().to_vec()),
         ("GET", "/api/init") => HttpResponse::json(session.init_response()?)?,
         ("POST", "/api/preview") => {
-            let preview = serde_json::from_slice::<PreviewRequest>(&request.body).map_err(|err| {
-                AdapterError::ExecutionError(format!("failed to decode preview request: {err}"))
-            })?;
+            let preview =
+                serde_json::from_slice::<PreviewRequest>(&request.body).map_err(|err| {
+                    AdapterError::ExecutionError(format!("failed to decode preview request: {err}"))
+                })?;
             HttpResponse::json(session.preview_response(preview)?)?
         }
         ("GET", "/screenshot") => HttpResponse::binary("image/png", session.screenshot_bytes()?),
@@ -348,16 +357,15 @@ struct HttpRequest {
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, AdapterError> {
-    let mut reader = BufReader::new(
-        stream
-            .try_clone()
-            .map_err(|err| AdapterError::ExecutionError(format!("failed to clone stream: {err}")))?,
-    );
+    let mut reader =
+        BufReader::new(stream.try_clone().map_err(|err| {
+            AdapterError::ExecutionError(format!("failed to clone stream: {err}"))
+        })?);
 
     let mut request_line = String::new();
-    reader
-        .read_line(&mut request_line)
-        .map_err(|err| AdapterError::ExecutionError(format!("failed to read request line: {err}")))?;
+    reader.read_line(&mut request_line).map_err(|err| {
+        AdapterError::ExecutionError(format!("failed to read request line: {err}"))
+    })?;
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("/").to_string();
@@ -365,9 +373,9 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, AdapterError
     let mut content_length = 0usize;
     loop {
         let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(|err| AdapterError::ExecutionError(format!("failed to read request header: {err}")))?;
+        reader.read_line(&mut line).map_err(|err| {
+            AdapterError::ExecutionError(format!("failed to read request header: {err}"))
+        })?;
         if line == "\r\n" || line.is_empty() {
             break;
         }
@@ -378,9 +386,9 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, AdapterError
 
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
-        reader
-            .read_exact(&mut body)
-            .map_err(|err| AdapterError::ExecutionError(format!("failed to read request body: {err}")))?;
+        reader.read_exact(&mut body).map_err(|err| {
+            AdapterError::ExecutionError(format!("failed to read request body: {err}"))
+        })?;
     }
 
     Ok(HttpRequest { method, path, body })
@@ -437,7 +445,9 @@ fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result
         response.body.len()
     );
     stream.write_all(header.as_bytes()).map_err(|err| {
-        AdapterError::ExecutionError(format!("failed to write calibration response header: {err}"))
+        AdapterError::ExecutionError(format!(
+            "failed to write calibration response header: {err}"
+        ))
     })?;
     stream.write_all(&response.body).map_err(|err| {
         AdapterError::ExecutionError(format!("failed to write calibration response body: {err}"))

@@ -33,8 +33,8 @@ pub fn run_solitaire_cash_inspect(args: &InspectSolitaireCashArgs) -> Result<(),
         enabled: true,
         dump_dir: args.debug_dir.clone(),
     };
-    let mut recognizer = PapayaSolitaireCashRecognizer::from_asset_dir(&args.assets)?
-        .with_debug(debug);
+    let mut recognizer =
+        PapayaSolitaireCashRecognizer::from_asset_dir(&args.assets)?.with_debug(debug);
     let layout = SolitaireCashLayout::default();
 
     for (index, image) in args.images.iter().enumerate() {
@@ -42,7 +42,10 @@ pub fn run_solitaire_cash_inspect(args: &InspectSolitaireCashArgs) -> Result<(),
         println!("path: {}", image.display());
         let report = recognizer.inspect_png(image, &layout)?;
         print_report(&report);
-        println!("foundation: {}", format_foundation(&report.board.foundation));
+        println!(
+            "foundation: {}",
+            format_foundation(&report.board.foundation)
+        );
         println!(
             "waste_visible: {}",
             format_cards(report.board.waste.iter().map(ToString::to_string).collect())
@@ -72,8 +75,8 @@ pub fn run_solitaire_cash_validate(
         enabled: true,
         dump_dir: args.debug_dir.clone(),
     };
-    let mut recognizer = PapayaSolitaireCashRecognizer::from_asset_dir(&args.assets)?
-        .with_debug(debug);
+    let mut recognizer =
+        PapayaSolitaireCashRecognizer::from_asset_dir(&args.assets)?.with_debug(debug);
     let layout = SolitaireCashLayout::default();
 
     for image in &args.images {

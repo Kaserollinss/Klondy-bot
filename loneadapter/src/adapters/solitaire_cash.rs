@@ -218,13 +218,7 @@ impl Default for SolitaireCashCalibration {
             layout: SolitaireCashLayout {
                 // Normalized from the mirrored macOS capture geometry (1280 x 1960).
                 column_lefts: [
-                    0.096875,
-                    0.2125,
-                    0.328125,
-                    0.44375,
-                    0.559375,
-                    0.675,
-                    0.790625,
+                    0.096875, 0.2125, 0.328125, 0.44375, 0.559375, 0.675, 0.790625,
                 ],
                 card_width: 0.112134,
                 card_height: 0.106000,
@@ -324,6 +318,7 @@ pub struct SolitaireCashAdapter<B> {
     scan_full_deck: bool,
     settle_time: Duration,
     scan_tap_delay: Duration,
+    scan_tap_burst_delay: Duration,
     max_deck_scan_taps: u8,
     debug: bool,
     last_observation: Option<ObservedBoard>,
@@ -338,6 +333,7 @@ impl<B> SolitaireCashAdapter<B> {
             scan_full_deck: true,
             settle_time: Duration::from_millis(500),
             scan_tap_delay: Duration::from_millis(180),
+            scan_tap_burst_delay: Duration::from_millis(10),
             max_deck_scan_taps: 64,
             debug: false,
             last_observation: None,
@@ -468,6 +464,50 @@ impl<B: SolitaireCashBackend> SolitaireCashAdapter<B> {
         self.backend.observe(&self.layout)
     }
 
+    /// Taps at `point`, then burst-captures until `accept` returns true or
+    /// the time budget (`scan_tap_delay`) is exhausted.
+    fn tap_and_observe_until(
+        &mut self,
+        point: Point,
+        accept: impl Fn(&ObservedBoard) -> bool,
+    ) -> Result<ObservedBoard, AdapterError> {
+        self.backend.tap(point)?;
+
+        if self.scan_tap_delay.is_zero() {
+            return self.observe();
+        }
+
+        let interval = self.scan_tap_burst_delay;
+        let max_retries: u8 = 6;
+
+        thread::sleep(interval);
+
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                thread::sleep(interval);
+            }
+            let obs = self.observe()?;
+            if accept(&obs) {
+                self.debug_log(format!(
+                    "burst observe accepted on attempt {}/{}",
+                    attempt + 1,
+                    max_retries + 1
+                ));
+                return Ok(obs);
+            }
+        }
+
+        let elapsed = interval * (max_retries as u32 + 1);
+        if let Some(remaining) = self.scan_tap_delay.checked_sub(elapsed) {
+            if !remaining.is_zero() {
+                thread::sleep(remaining);
+            }
+        }
+        let obs = self.observe()?;
+        self.debug_log("burst observe exhausted retries, using final observation");
+        Ok(obs)
+    }
+
     fn scan_known_deck_order(
         &mut self,
         original: &ObservedBoard,
@@ -505,9 +545,10 @@ impl<B: SolitaireCashBackend> SolitaireCashAdapter<B> {
                     "deck scan exceeded tap budget before reset".into(),
                 ));
             }
-            self.tap_and_wait(stock_point, self.scan_tap_delay)?;
             taps_used += 1;
-            working = self.observe()?;
+            working = self.tap_and_observe_until(stock_point, |obs| {
+                obs.stock_present && obs.waste.is_empty()
+            })?;
             self.debug_log(format!(
                 "deck scan reset tap {}: waste_visible={} stock_present={}",
                 taps_used,
@@ -527,9 +568,8 @@ impl<B: SolitaireCashBackend> SolitaireCashAdapter<B> {
                     "deck scan exceeded tap budget during stock traversal".into(),
                 ));
             }
-            self.tap_and_wait(stock_point, self.scan_tap_delay)?;
             taps_used += 1;
-            working = self.observe()?;
+            working = self.tap_and_observe_until(stock_point, |obs| !obs.waste.is_empty())?;
 
             if working.stock_present && working.waste.is_empty() {
                 completed_cycles += 1;
@@ -593,13 +633,11 @@ impl<B: SolitaireCashBackend> SolitaireCashAdapter<B> {
                     idx
                 ))
             })?;
-            known_deck_order
-                .try_push(card)
-                .map_err(|_| {
-                    AdapterError::RecognitionError(
-                        "detected more deck cards than fit in a Klondike stock".into(),
-                    )
-                })?;
+            known_deck_order.try_push(card).map_err(|_| {
+                AdapterError::RecognitionError(
+                    "detected more deck cards than fit in a Klondike stock".into(),
+                )
+            })?;
         }
 
         for _ in 0..taps_used {
@@ -726,7 +764,9 @@ impl<B: SolitaireCashBackend> ScreenAdapter for SolitaireCashAdapter<B> {
         };
 
         board.validate().map_err(|err| {
-            AdapterError::RecognitionError(format!("recognized invalid Solitaire Cash board: {err:?}"))
+            AdapterError::RecognitionError(format!(
+                "recognized invalid Solitaire Cash board: {err:?}"
+            ))
         })?;
 
         self.debug_log(self.describe_board(&board));
@@ -750,10 +790,9 @@ impl<B: SolitaireCashBackend> ScreenAdapter for SolitaireCashAdapter<B> {
             return self.backend.tap(self.layout.stock_point());
         }
 
-        let observed = self
-            .last_observation
-            .as_ref()
-            .ok_or_else(|| AdapterError::ExecutionError("no cached board for move execution".into()))?;
+        let observed = self.last_observation.as_ref().ok_or_else(|| {
+            AdapterError::ExecutionError("no cached board for move execution".into())
+        })?;
 
         let from = self.source_point_for_move(observed, m)?;
         let to = self.destination_point_for_move(observed, m)?;
@@ -827,7 +866,10 @@ mod tests {
     }
 
     impl SolitaireCashBackend for MockBackend {
-        fn observe(&mut self, _layout: &SolitaireCashLayout) -> Result<ObservedBoard, AdapterError> {
+        fn observe(
+            &mut self,
+            _layout: &SolitaireCashLayout,
+        ) -> Result<ObservedBoard, AdapterError> {
             let start = self.draw_cur.saturating_sub(3) as usize;
             let end = self.draw_cur as usize;
             let waste = self.deck_order[start..end].iter().copied().collect();
@@ -844,7 +886,9 @@ mod tests {
         fn tap(&mut self, point: Point) -> Result<(), AdapterError> {
             self.taps.push(point);
             if !self.interactive {
-                return Err(AdapterError::ExecutionError("mock backend is read-only".into()));
+                return Err(AdapterError::ExecutionError(
+                    "mock backend is read-only".into(),
+                ));
             }
 
             let layout = SolitaireCashLayout::default();
@@ -873,7 +917,9 @@ mod tests {
             if self.interactive {
                 Ok(())
             } else {
-                Err(AdapterError::ExecutionError("mock backend is read-only".into()))
+                Err(AdapterError::ExecutionError(
+                    "mock backend is read-only".into(),
+                ))
             }
         }
 
@@ -894,12 +940,11 @@ mod tests {
         let board = adapter.read_board().unwrap();
 
         let known = board.known_deck_order.expect("expected full deck order");
-        let expected: ArrayVec<Card, { N_DECK_CARDS as usize }> = [
-            "QH", "QD", "QC", "QS", "KH", "KD", "KC", "KS",
-        ]
-        .into_iter()
-        .map(|card| parse_card(card).unwrap())
-        .collect();
+        let expected: ArrayVec<Card, { N_DECK_CARDS as usize }> =
+            ["QH", "QD", "QC", "QS", "KH", "KD", "KC", "KS"]
+                .into_iter()
+                .map(|card| parse_card(card).unwrap())
+                .collect();
 
         assert_eq!(board.stock_count, 3);
         assert_eq!(board.waste.len(), 3);

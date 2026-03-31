@@ -181,6 +181,8 @@ pub struct PapayaSolitaireCashRecognizer {
     calibration: SolitaireCashCalibration,
     templates: TemplateLibrary,
     next_debug_id: u64,
+    next_debug_scope_id: u64,
+    active_debug_dir: Option<PathBuf>,
     debug: DebugOptions,
 }
 
@@ -206,6 +208,8 @@ impl PapayaSolitaireCashRecognizer {
             calibration: SolitaireCashCalibration::default(),
             templates: TemplateLibrary::load(asset_dir)?,
             next_debug_id: 0,
+            next_debug_scope_id: 0,
+            active_debug_dir: None,
             debug: DebugOptions::default(),
         })
     }
@@ -247,7 +251,9 @@ impl PapayaSolitaireCashRecognizer {
     }
 
     fn white_ratio(&self, image: &DynamicImage, rect: Rect) -> f32 {
-        let crop = image.crop_imm(rect.x, rect.y, rect.width, rect.height).to_rgb8();
+        let crop = image
+            .crop_imm(rect.x, rect.y, rect.width, rect.height)
+            .to_rgb8();
         let mut white = 0usize;
         let total = crop.pixels().len().max(1);
         let threshold = self.calibration.vision.white_min_rgb;
@@ -260,7 +266,9 @@ impl PapayaSolitaireCashRecognizer {
     }
 
     fn ink_ratio(&self, image: &DynamicImage, rect: Rect) -> f32 {
-        let crop = image.crop_imm(rect.x, rect.y, rect.width, rect.height).to_rgb8();
+        let crop = image
+            .crop_imm(rect.x, rect.y, rect.width, rect.height)
+            .to_rgb8();
         let mut ink = 0usize;
         let total = crop.pixels().len().max(1);
         let vision = self.calibration.vision;
@@ -268,10 +276,10 @@ impl PapayaSolitaireCashRecognizer {
             let is_white = px[0] > vision.white_min_rgb
                 && px[1] > vision.white_min_rgb
                 && px[2] > vision.white_min_rgb;
-            let distance_from_background =
-                (i32::from(px[0]) - i32::from(vision.background_rgb[0])).abs()
-                    + (i32::from(px[1]) - i32::from(vision.background_rgb[1])).abs()
-                    + (i32::from(px[2]) - i32::from(vision.background_rgb[2])).abs();
+            let distance_from_background = (i32::from(px[0]) - i32::from(vision.background_rgb[0]))
+                .abs()
+                + (i32::from(px[1]) - i32::from(vision.background_rgb[1])).abs()
+                + (i32::from(px[2]) - i32::from(vision.background_rgb[2])).abs();
             if !is_white && distance_from_background > vision.background_distance_threshold {
                 ink += 1;
             }
@@ -280,7 +288,9 @@ impl PapayaSolitaireCashRecognizer {
     }
 
     fn purple_ratio(&self, image: &DynamicImage, rect: Rect) -> f32 {
-        let crop = image.crop_imm(rect.x, rect.y, rect.width, rect.height).to_rgb8();
+        let crop = image
+            .crop_imm(rect.x, rect.y, rect.width, rect.height)
+            .to_rgb8();
         let mut purple = 0usize;
         let total = crop.pixels().len().max(1);
         let vision = self.calibration.vision;
@@ -367,9 +377,7 @@ impl PapayaSolitaireCashRecognizer {
         });
         let state = if purple > self.calibration.vision.face_down_purple_ratio && white < 0.55 {
             SlotState::FaceDown
-        } else if white > self.calibration.vision.face_up_white_ratio
-            && ink > 0.04
-            && corner_match
+        } else if white > self.calibration.vision.face_up_white_ratio && ink > 0.04 && corner_match
         {
             SlotState::FaceUp
         } else {
@@ -436,18 +444,53 @@ impl PapayaSolitaireCashRecognizer {
         state
     }
 
-    fn next_debug_path(&mut self, stem: &str, suffix: &str) -> Result<Option<PathBuf>, AdapterError> {
-        let Some(dump_dir) = &self.debug.dump_dir else {
+    fn sanitize_debug_name(name: &str) -> String {
+        let mut sanitized = String::with_capacity(name.len());
+        for ch in name.chars() {
+            if ch.is_ascii_alphanumeric() {
+                sanitized.push(ch);
+            } else {
+                sanitized.push('-');
+            }
+        }
+        sanitized.trim_matches('-').to_string()
+    }
+
+    fn resolve_debug_dir_for_png(&mut self, png_path: &Path) -> Option<PathBuf> {
+        let dump_dir = self.debug.dump_dir.as_ref()?;
+        if png_path.starts_with(dump_dir) {
+            let parent = png_path.parent()?;
+            if parent != dump_dir {
+                return Some(parent.to_path_buf());
+            }
+        }
+
+        self.next_debug_scope_id += 1;
+        let stem = png_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(Self::sanitize_debug_name)
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or_else(|| "screenshot".to_string());
+        Some(dump_dir.join(format!("{stem}-{:04}", self.next_debug_scope_id)))
+    }
+
+    fn next_debug_path(
+        &mut self,
+        stem: &str,
+        suffix: &str,
+    ) -> Result<Option<PathBuf>, AdapterError> {
+        let Some(target_dir) = &self.active_debug_dir else {
             return Ok(None);
         };
-        fs::create_dir_all(dump_dir).map_err(|err| {
+        fs::create_dir_all(target_dir).map_err(|err| {
             AdapterError::RecognitionError(format!(
-                "failed to create debug crop dir {}: {err}",
-                dump_dir.display()
+                "failed to create debug artifact dir {}: {err}",
+                target_dir.display()
             ))
         })?;
         self.next_debug_id += 1;
-        Ok(Some(dump_dir.join(format!(
+        Ok(Some(target_dir.join(format!(
             "{stem}-{}-{}.{}",
             std::process::id(),
             self.next_debug_id,
@@ -473,7 +516,8 @@ impl PapayaSolitaireCashRecognizer {
                     path.display()
                 ))
             })?;
-        self.debug.log(format!("saved debug crop {}", path.display()));
+        self.debug
+            .log(format!("saved debug crop {}", path.display()));
         Ok(())
     }
 
@@ -481,34 +525,30 @@ impl PapayaSolitaireCashRecognizer {
         let Some(path) = self.next_debug_path(stem, "png")? else {
             return Ok(());
         };
-        mask
-            .save(&path)
-            .map_err(|err| {
-                AdapterError::RecognitionError(format!(
-                    "failed to save debug mask {}: {err}",
-                    path.display()
-                ))
-            })?;
-        self.debug.log(format!("saved debug mask {}", path.display()));
+        mask.save(&path).map_err(|err| {
+            AdapterError::RecognitionError(format!(
+                "failed to save debug mask {}: {err}",
+                path.display()
+            ))
+        })?;
+        self.debug
+            .log(format!("saved debug mask {}", path.display()));
         Ok(())
     }
 
     fn debug_slot_stem(&self, slot_label: &str, suffix: &str) -> String {
-        let mut sanitized = String::with_capacity(slot_label.len() + suffix.len() + 1);
-        for ch in slot_label.chars() {
-            if ch.is_ascii_alphanumeric() {
-                sanitized.push(ch);
-            } else {
-                sanitized.push('_');
-            }
+        let base = Self::sanitize_debug_name(slot_label);
+        if base.is_empty() {
+            suffix.to_string()
+        } else {
+            format!("{base}-{suffix}")
         }
-        sanitized.push('-');
-        sanitized.push_str(suffix);
-        sanitized
     }
 
     fn locate_face_anchor(&self, image: &DynamicImage, rect: Rect) -> Rect {
-        let crop = image.crop_imm(rect.x, rect.y, rect.width, rect.height).to_rgb8();
+        let crop = image
+            .crop_imm(rect.x, rect.y, rect.width, rect.height)
+            .to_rgb8();
         let mut left = 0u32;
         let mut top = 0u32;
         let vision = self.calibration.vision;
@@ -590,8 +630,14 @@ impl PapayaSolitaireCashRecognizer {
             .match_suit(&self.grayscale_crop(image, self.suit_rect(anchored)))?;
         Ok(CardCornerSignal {
             accepted_pair: rank.accepted.is_some() && suit.accepted.is_some(),
-            rank_best: rank.candidates.first().map_or(1.0, |candidate| candidate.score),
-            suit_best: suit.candidates.first().map_or(1.0, |candidate| candidate.score),
+            rank_best: rank
+                .candidates
+                .first()
+                .map_or(1.0, |candidate| candidate.score),
+            suit_best: suit
+                .candidates
+                .first()
+                .map_or(1.0, |candidate| candidate.score),
         })
     }
 
@@ -602,7 +648,11 @@ impl PapayaSolitaireCashRecognizer {
         slot_label: &str,
     ) -> Result<MatchReport, AdapterError> {
         let rank_rect = self.rank_rect(self.locate_face_anchor(image, rect));
-        self.save_debug_crop(image, rank_rect, &self.debug_slot_stem(slot_label, "rank-raw"))?;
+        self.save_debug_crop(
+            image,
+            rank_rect,
+            &self.debug_slot_stem(slot_label, "rank-raw"),
+        )?;
         let gray = self.grayscale_crop(image, rank_rect);
         let report = self.templates.match_rank(&gray)?;
         self.save_debug_mask(
@@ -631,7 +681,11 @@ impl PapayaSolitaireCashRecognizer {
         slot_label: &str,
     ) -> Result<MatchReport, AdapterError> {
         let suit_rect = self.suit_rect(self.locate_face_anchor(image, rect));
-        self.save_debug_crop(image, suit_rect, &self.debug_slot_stem(slot_label, "suit-raw"))?;
+        self.save_debug_crop(
+            image,
+            suit_rect,
+            &self.debug_slot_stem(slot_label, "suit-raw"),
+        )?;
         let gray = self.grayscale_crop(image, suit_rect);
         let report = self.templates.match_suit(&gray)?;
         self.save_debug_mask(
@@ -695,7 +749,9 @@ impl PapayaSolitaireCashRecognizer {
             width: rect.width.saturating_sub(inset_x * 2).max(1),
             height: rect.height.saturating_sub(inset_y * 2).max(1),
         };
-        let crop = image.crop_imm(inner.x, inner.y, inner.width, inner.height).to_rgb8();
+        let crop = image
+            .crop_imm(inner.x, inner.y, inner.width, inner.height)
+            .to_rgb8();
         let mut foreground = 0usize;
         let total = crop.pixels().len().max(1);
         for px in crop.pixels() {
@@ -739,8 +795,12 @@ impl PapayaSolitaireCashRecognizer {
             .map(|recognition| {
                 (
                     recognition.card,
-                    recognition.rank.map_or_else(Vec::new, |report| report.candidates),
-                    recognition.suit.map_or_else(Vec::new, |report| report.candidates),
+                    recognition
+                        .rank
+                        .map_or_else(Vec::new, |report| report.candidates),
+                    recognition
+                        .suit
+                        .map_or_else(Vec::new, |report| report.candidates),
                     recognition.low_confidence,
                 )
             })
@@ -756,7 +816,12 @@ impl PapayaSolitaireCashRecognizer {
         });
     }
 
-    fn waste_rects(&self, layout: &SolitaireCashLayout, image_width: u32, image_height: u32) -> [Rect; 3] {
+    fn waste_rects(
+        &self,
+        layout: &SolitaireCashLayout,
+        image_width: u32,
+        image_height: u32,
+    ) -> [Rect; 3] {
         let overlap = layout.card_width * self.calibration.vision.waste_overlap;
         core::array::from_fn(|idx| {
             Rect::from_norm(
@@ -775,8 +840,16 @@ impl PapayaSolitaireCashRecognizer {
         let max_y = image.height().saturating_sub(1);
         let left = rect.x.min(max_x);
         let top = rect.y.min(max_y);
-        let right = rect.x.saturating_add(rect.width).saturating_sub(1).min(max_x);
-        let bottom = rect.y.saturating_add(rect.height).saturating_sub(1).min(max_y);
+        let right = rect
+            .x
+            .saturating_add(rect.width)
+            .saturating_sub(1)
+            .min(max_x);
+        let bottom = rect
+            .y
+            .saturating_add(rect.height)
+            .saturating_sub(1)
+            .min(max_y);
         for x in left..=right {
             image.put_pixel(x, top, color);
             image.put_pixel(x, bottom, color);
@@ -802,11 +875,14 @@ impl PapayaSolitaireCashRecognizer {
         rects: &[(Rect, SlotState)],
         png_path: &Path,
     ) -> Result<Option<PathBuf>, AdapterError> {
-        let Some(path) = self.next_debug_path(
-            png_path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("annotated"),
-            "png",
-        )?
-        else {
+        let overlay_stem = png_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(Self::sanitize_debug_name)
+            .filter(|stem| !stem.is_empty())
+            .map(|stem| format!("{stem}-annotated"))
+            .unwrap_or_else(|| "annotated".to_string());
+        let Some(path) = self.next_debug_path(&overlay_stem, "png")? else {
             return Ok(None);
         };
         let mut annotated = image.to_rgba8();
@@ -819,7 +895,8 @@ impl PapayaSolitaireCashRecognizer {
                 path.display()
             ))
         })?;
-        self.debug.log(format!("saved annotated overlay {}", path.display()));
+        self.debug
+            .log(format!("saved annotated overlay {}", path.display()));
         Ok(Some(path))
     }
 
@@ -828,98 +905,38 @@ impl PapayaSolitaireCashRecognizer {
         png_path: &Path,
         layout: &SolitaireCashLayout,
     ) -> Result<RecognitionReport, AdapterError> {
-        let image = image::open(png_path).map_err(|err| {
-            AdapterError::RecognitionError(format!(
-                "failed to load screenshot {}: {err}",
-                png_path.display()
-            ))
-        })?;
+        let previous_debug_dir = self.active_debug_dir.take();
+        self.active_debug_dir = self.resolve_debug_dir_for_png(png_path);
 
-        let mut slot_reports = Vec::new();
-        let mut overlay_rects = Vec::new();
-        let mut foundation = [0u8; N_SUITS as usize];
-        for suit_slot in 0..N_SUITS as usize {
-            let label = format!("foundation-{}", suit_slot + 1);
-            let rect = Self::card_rect(layout, image.width(), image.height(), suit_slot, layout.top_row_top);
-            let state = self.classify_general_state(&image, rect);
-            overlay_rects.push((rect, state));
-            let recognition = if state == SlotState::FaceUp {
-                Some(self.recognize_card(&image, rect, &label)?)
-            } else {
-                None
-            };
-            if let Some(card) = recognition.as_ref().and_then(|result| result.card) {
-                foundation[card.suit() as usize] = card.rank() + 1;
-            }
-            self.record_slot(
-                &mut slot_reports,
-                label,
-                rect,
-                image.width(),
-                image.height(),
-                state,
-                recognition,
-            );
-        }
+        let result = (|| {
+            let image = image::open(png_path).map_err(|err| {
+                AdapterError::RecognitionError(format!(
+                    "failed to load screenshot {}: {err}",
+                    png_path.display()
+                ))
+            })?;
 
-        let piles = core::array::from_fn(|pile_idx| {
-            let mut hidden_count = 0u8;
-            for hidden_idx in 0..=pile_idx {
-                let label = format!("pile-{}-hidden-{}", pile_idx + 1, hidden_idx + 1);
+            let mut slot_reports = Vec::new();
+            let mut overlay_rects = Vec::new();
+            let mut foundation = [0u8; N_SUITS as usize];
+            for suit_slot in 0..N_SUITS as usize {
+                let label = format!("foundation-{}", suit_slot + 1);
                 let rect = Self::card_rect(
                     layout,
                     image.width(),
                     image.height(),
-                    pile_idx,
-                    layout.tableau_top + layout.hidden_fan_y * hidden_idx as f32,
+                    suit_slot,
+                    layout.top_row_top,
                 );
-                let state = self.classify_tableau_hidden_state(
-                    &image,
-                    rect,
-                    layout,
-                    image.height(),
-                    &label,
-                );
+                let state = self.classify_general_state(&image, rect);
                 overlay_rects.push((rect, state));
-                match state {
-                    SlotState::FaceDown => {
-                        hidden_count += 1;
-                        self.record_slot(
-                            &mut slot_reports,
-                            label,
-                            rect,
-                            image.width(),
-                            image.height(),
-                            state,
-                            None,
-                        );
-                    }
-                    SlotState::FaceUp => break,
-                    SlotState::Empty | SlotState::Recycle => break,
-                }
-            }
-
-            let mut cards = PileVec::new();
-            for visible_idx in 0..13usize {
-                let label = format!("pile-{}-visible-{}", pile_idx + 1, visible_idx + 1);
-                let top = layout.tableau_top
-                    + layout.hidden_fan_y * hidden_count as f32
-                    + layout.visible_fan_y * visible_idx as f32;
-                let rect = Self::card_rect(layout, image.width(), image.height(), pile_idx, top);
-                let state = self.classify_tableau_visible_state(
-                    &image,
-                    rect,
-                    layout,
-                    image.height(),
-                    &label,
-                );
-                overlay_rects.push((rect, state));
-                if state != SlotState::FaceUp {
-                    break;
-                }
-                let recognition = self.recognize_card(&image, rect, &label).ok();
+                let recognition = if state == SlotState::FaceUp {
+                    Some(self.recognize_card(&image, rect, &label)?)
+                } else {
+                    None
+                };
                 if let Some(card) = recognition.as_ref().and_then(|result| result.card) {
-                    cards.push(card);
+                    foundation[card.suit() as usize] = card.rank() + 1;
                 }
                 self.record_slot(
                     &mut slot_reports,
@@ -932,88 +949,173 @@ impl PapayaSolitaireCashRecognizer {
                 );
             }
 
-            ObservedPile { hidden_count, cards }
-        });
+            let piles = core::array::from_fn(|pile_idx| {
+                let mut hidden_count = 0u8;
+                for hidden_idx in 0..=pile_idx {
+                    let label = format!("pile-{}-hidden-{}", pile_idx + 1, hidden_idx + 1);
+                    let rect = Self::card_rect(
+                        layout,
+                        image.width(),
+                        image.height(),
+                        pile_idx,
+                        layout.tableau_top + layout.hidden_fan_y * hidden_idx as f32,
+                    );
+                    let state = self.classify_tableau_hidden_state(
+                        &image,
+                        rect,
+                        layout,
+                        image.height(),
+                        &label,
+                    );
+                    overlay_rects.push((rect, state));
+                    match state {
+                        SlotState::FaceDown => {
+                            hidden_count += 1;
+                            self.record_slot(
+                                &mut slot_reports,
+                                label,
+                                rect,
+                                image.width(),
+                                image.height(),
+                                state,
+                                None,
+                            );
+                        }
+                        SlotState::FaceUp => break,
+                        SlotState::Empty | SlotState::Recycle => break,
+                    }
+                }
 
-        let mut waste = ArrayVec::<Card, { N_DECK_CARDS as usize }>::new();
-        for (idx, rect) in self
-            .waste_rects(layout, image.width(), image.height())
-            .into_iter()
-            .enumerate()
-        {
-            let label = format!("waste-{}", idx + 1);
-            let state = self.classify_general_state(&image, rect);
-            overlay_rects.push((rect, state));
-            let recognition = if state == SlotState::FaceUp {
-                Some(self.recognize_card(&image, rect, &label)?)
-            } else {
-                None
-            };
-            if let Some(card) = recognition.as_ref().and_then(|result| result.card) {
-                waste.push(card);
+                let mut cards = PileVec::new();
+                for visible_idx in 0..13usize {
+                    let label = format!("pile-{}-visible-{}", pile_idx + 1, visible_idx + 1);
+                    let top = layout.tableau_top
+                        + layout.hidden_fan_y * hidden_count as f32
+                        + layout.visible_fan_y * visible_idx as f32;
+                    let rect =
+                        Self::card_rect(layout, image.width(), image.height(), pile_idx, top);
+                    let state = self.classify_tableau_visible_state(
+                        &image,
+                        rect,
+                        layout,
+                        image.height(),
+                        &label,
+                    );
+                    overlay_rects.push((rect, state));
+                    if state != SlotState::FaceUp {
+                        break;
+                    }
+                    let recognition = self.recognize_card(&image, rect, &label).ok();
+                    if let Some(card) = recognition.as_ref().and_then(|result| result.card) {
+                        cards.push(card);
+                    }
+                    self.record_slot(
+                        &mut slot_reports,
+                        label,
+                        rect,
+                        image.width(),
+                        image.height(),
+                        state,
+                        recognition,
+                    );
+                }
+
+                ObservedPile {
+                    hidden_count,
+                    cards,
+                }
+            });
+
+            let mut waste = ArrayVec::<Card, { N_DECK_CARDS as usize }>::new();
+            for (idx, rect) in self
+                .waste_rects(layout, image.width(), image.height())
+                .into_iter()
+                .enumerate()
+            {
+                let label = format!("waste-{}", idx + 1);
+                let state = self.classify_general_state(&image, rect);
+                overlay_rects.push((rect, state));
+                let recognition = if state == SlotState::FaceUp {
+                    Some(self.recognize_card(&image, rect, &label)?)
+                } else {
+                    None
+                };
+                if let Some(card) = recognition.as_ref().and_then(|result| result.card) {
+                    waste.push(card);
+                }
+                self.record_slot(
+                    &mut slot_reports,
+                    label,
+                    rect,
+                    image.width(),
+                    image.height(),
+                    state,
+                    recognition,
+                );
             }
-            self.record_slot(
-                &mut slot_reports,
-                label,
-                rect,
+
+            let stock_rect = Rect::from_norm(
                 image.width(),
                 image.height(),
-                state,
-                recognition,
+                layout.column_lefts[6],
+                layout.top_row_top,
+                layout.card_width,
+                layout.card_height,
             );
-        }
+            let stock_state = self.classify_stock_state(&image, stock_rect);
+            overlay_rects.push((stock_rect, stock_state));
+            self.record_slot(
+                &mut slot_reports,
+                "stock",
+                stock_rect,
+                image.width(),
+                image.height(),
+                stock_state,
+                None,
+            );
 
-        let stock_rect = Rect::from_norm(
-            image.width(),
-            image.height(),
-            layout.column_lefts[6],
-            layout.top_row_top,
-            layout.card_width,
-            layout.card_height,
-        );
-        let stock_state = self.classify_stock_state(&image, stock_rect);
-        overlay_rects.push((stock_rect, stock_state));
-        self.record_slot(
-            &mut slot_reports,
-            "stock",
-            stock_rect,
-            image.width(),
-            image.height(),
-            stock_state,
-            None,
-        );
+            let board = ObservedBoard {
+                foundation,
+                piles,
+                waste,
+                stock_count: 0,
+                stock_present: matches!(stock_state, SlotState::FaceDown | SlotState::Recycle),
+            };
 
-        let board = ObservedBoard {
-            foundation,
-            piles,
-            waste,
-            stock_count: 0,
-            stock_present: matches!(stock_state, SlotState::FaceDown | SlotState::Recycle),
-        };
+            if self.debug.enabled {
+                let pile_summary = board
+                    .piles
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, pile)| {
+                        format!(
+                            "p{} hidden={} visible={}",
+                            idx + 1,
+                            pile.hidden_count,
+                            pile.cards.len()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.debug.log(format!(
+                    "recognized board foundation={:?} waste_visible={} stock_present={} {pile_summary}",
+                    board.foundation,
+                    board.waste.len(),
+                    board.stock_present
+                ));
+            }
 
-        if self.debug.enabled {
-            let pile_summary = board
-                .piles
-                .iter()
-                .enumerate()
-                .map(|(idx, pile)| format!("p{} hidden={} visible={}", idx + 1, pile.hidden_count, pile.cards.len()))
-                .collect::<Vec<_>>()
-                .join(", ");
-            self.debug.log(format!(
-                "recognized board foundation={:?} waste_visible={} stock_present={} {pile_summary}",
-                board.foundation,
-                board.waste.len(),
-                board.stock_present
-            ));
-        }
+            Ok(RecognitionReport {
+                annotated_path: self.save_annotated_overlay(&image, &overlay_rects, png_path)?,
+                board,
+                slots: slot_reports,
+                image_width: image.width(),
+                image_height: image.height(),
+            })
+        })();
 
-        Ok(RecognitionReport {
-            annotated_path: self.save_annotated_overlay(&image, &overlay_rects, png_path)?,
-            board,
-            slots: slot_reports,
-            image_width: image.width(),
-            image_height: image.height(),
-        })
+        self.active_debug_dir = previous_debug_dir;
+        result
     }
 
     pub fn inspect_png_with_calibration(
@@ -1103,7 +1205,8 @@ impl PngBoardRecognizer for PapayaSolitaireCashRecognizer {
         png_path: &Path,
         layout: &SolitaireCashLayout,
     ) -> Result<ObservedBoard, AdapterError> {
-        self.inspect_png(png_path, layout).map(|report| report.board)
+        self.inspect_png(png_path, layout)
+            .map(|report| report.board)
     }
 }
 
@@ -1114,11 +1217,7 @@ pub trait MouseController {
         ))
     }
 
-    fn drag_abs(
-        &mut self,
-        _from: (f64, f64),
-        _to: (f64, f64),
-    ) -> Result<(), AdapterError> {
+    fn drag_abs(&mut self, _from: (f64, f64), _to: (f64, f64)) -> Result<(), AdapterError> {
         Err(AdapterError::ExecutionError(
             "mouse interaction is not enabled".into(),
         ))
@@ -1289,13 +1388,14 @@ impl ScreenshotSource for MacScreenCapture {
 
         self.capture_index += 1;
         if let Some(dump_dir) = &self.debug.dump_dir {
-            fs::create_dir_all(dump_dir).map_err(|err| {
+            let screenshot_dir = dump_dir.join(format!("capture-{:04}", self.capture_index));
+            fs::create_dir_all(&screenshot_dir).map_err(|err| {
                 AdapterError::CaptureError(format!(
                     "failed to create debug dump dir {}: {err}",
-                    dump_dir.display()
+                    screenshot_dir.display()
                 ))
             })?;
-            let dump_path = dump_dir.join(format!("capture-{:04}.png", self.capture_index));
+            let dump_path = screenshot_dir.join(format!("capture-{:04}.png", self.capture_index));
             fs::copy(&self.output_path, &dump_path).map_err(|err| {
                 AdapterError::CaptureError(format!(
                     "failed to copy debug screenshot to {}: {err}",
@@ -1304,6 +1404,7 @@ impl ScreenshotSource for MacScreenCapture {
             })?;
             self.debug
                 .log(format!("saved debug capture {}", dump_path.display()));
+            return Ok(dump_path);
         }
 
         Ok(self.output_path.clone())
@@ -1432,10 +1533,7 @@ mod macos_mouse {
         fn CFRelease(cf: *const c_void);
     }
 
-    pub fn post_mouse_event(
-        kind: MouseEventKind,
-        point: (f64, f64),
-    ) -> Result<(), AdapterError> {
+    pub fn post_mouse_event(kind: MouseEventKind, point: (f64, f64)) -> Result<(), AdapterError> {
         let event = unsafe {
             CGEventCreateMouseEvent(
                 std::ptr::null(),
@@ -1513,11 +1611,7 @@ mod tests {
             Ok(())
         }
 
-        fn drag_abs(
-            &mut self,
-            from: (f64, f64),
-            to: (f64, f64),
-        ) -> Result<(), AdapterError> {
+        fn drag_abs(&mut self, from: (f64, f64), to: (f64, f64)) -> Result<(), AdapterError> {
             self.drags.push((from, to));
             Ok(())
         }
@@ -1579,12 +1673,9 @@ mod tests {
             board: empty_board(),
         };
         let mouse = MockMouse::default();
-        let mut backend = ScreenshotVisionBackend::new(
-            capture,
-            vision,
-            ScreenRegion::new(50, 75, 200, 400),
-        )
-        .with_mouse(mouse);
+        let mut backend =
+            ScreenshotVisionBackend::new(capture, vision, ScreenRegion::new(50, 75, 200, 400))
+                .with_mouse(mouse);
 
         backend.tap(Point { x: 0.5, y: 0.25 }).unwrap();
         backend
