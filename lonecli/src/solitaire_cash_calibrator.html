@@ -1,0 +1,1236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Solitaire Cash Calibration</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1b17;
+      --panel: #173428;
+      --panel-2: #214736;
+      --panel-3: #10261c;
+      --ink: #eef7ef;
+      --muted: #b4d2bc;
+      --accent: #a8ff9f;
+      --accent-2: #8ee5ee;
+      --warn: #ffd166;
+      --danger: #ff7b72;
+      --line: rgba(255, 255, 255, 0.12);
+      --mono: "SFMono-Regular", Menlo, Consolas, monospace;
+      --sans: "Avenir Next", "Helvetica Neue", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top, #1e5c3c, var(--bg) 55%);
+      color: var(--ink);
+      font-family: var(--sans);
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: minmax(640px, 1fr) 420px;
+      min-height: 100vh;
+      gap: 16px;
+      padding: 16px;
+    }
+
+    .canvas-panel, .sidebar {
+      background: rgba(12, 28, 22, 0.84);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      backdrop-filter: blur(10px);
+      overflow: hidden;
+    }
+
+    .canvas-panel {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      align-items: center;
+    }
+
+    .toolbar label, .toggles label {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    select, button, input[type="number"] {
+      background: var(--panel-2);
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px 10px;
+      font: inherit;
+    }
+
+    button {
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    button:hover {
+      border-color: rgba(168, 255, 159, 0.5);
+    }
+
+    .toggles {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-left: auto;
+    }
+
+    .canvas-wrap {
+      position: relative;
+      padding: 14px;
+      overflow: auto;
+      flex: 1;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      max-width: 100%;
+      border-radius: 16px;
+      background: #0d2317;
+    }
+
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .sidebar-scroll {
+      overflow: auto;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px;
+    }
+
+    .card h3 {
+      margin: 0 0 10px;
+      font-size: 14px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+
+    .status {
+      font-size: 12px;
+      color: var(--warn);
+      min-height: 18px;
+      margin-bottom: 6px;
+    }
+
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .property-group + .property-group {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+
+    .property-group-title {
+      margin: 0 0 8px;
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .property-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .property-buttons button {
+      font-size: 12px;
+      padding: 7px 10px;
+    }
+
+    .property-buttons button.active {
+      border-color: rgba(168, 255, 159, 0.8);
+      box-shadow: 0 0 0 1px rgba(168, 255, 159, 0.3) inset;
+      background: #1a4b35;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 110px;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .controls label {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .controls input[type="number"] {
+      width: 100%;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .preview-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .preview-grid img {
+      width: 100%;
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      image-rendering: pixelated;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 220px;
+      resize: vertical;
+      background: var(--panel-3);
+      color: #f4fff6;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: #d4ecd8;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <section class="canvas-panel">
+      <div class="toolbar">
+        <label>
+          Selected Face-Up Slot
+          <select id="slotSelect"></select>
+        </label>
+        <button id="resetBtn" type="button">Reset Defaults</button>
+        <button id="copyBtn" type="button">Copy Calibration</button>
+        <div class="toggles">
+          <label><input type="checkbox" id="toggleSlots" checked /> Slots</label>
+          <label><input type="checkbox" id="focusTableau" /> Focus Active Pile</label>
+          <label><input type="checkbox" id="togglePoints" checked /> Click Points</label>
+          <label><input type="checkbox" id="toggleSelected" checked /> Selected Crops</label>
+        </div>
+      </div>
+      <div class="canvas-wrap">
+        <canvas id="mainCanvas"></canvas>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <div class="sidebar-scroll">
+        <div class="card">
+          <h3>Active Property</h3>
+          <div class="status" id="statusText">Loading calibration preview…</div>
+          <pre id="instructionText">Choose a property, then click or drag on the screenshot.</pre>
+        </div>
+
+        <div class="card">
+          <h3>Property Picker</h3>
+          <div id="propertyGroups"></div>
+        </div>
+
+        <div class="card">
+          <h3>Numeric Fallback</h3>
+          <div class="controls" id="layoutControls"></div>
+          <div style="height: 12px"></div>
+          <div class="controls" id="visionControls"></div>
+        </div>
+
+        <div class="card">
+          <h3>Selected Slot Preview</h3>
+          <div class="preview-grid">
+            <img id="rankRawImg" alt="rank raw" />
+            <img id="rankMaskImg" alt="rank mask" />
+            <img id="suitRawImg" alt="suit raw" />
+            <img id="suitMaskImg" alt="suit mask" />
+          </div>
+          <pre id="candidateText"></pre>
+        </div>
+
+        <div class="card">
+          <h3>Board Summary</h3>
+          <pre id="boardSummary"></pre>
+        </div>
+
+        <div class="card">
+          <h3>Paste-Ready Calibration</h3>
+          <textarea id="exportText" spellcheck="false"></textarea>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("mainCanvas");
+    const ctx = canvas.getContext("2d");
+    const image = new Image();
+    image.src = "/screenshot";
+
+    const PROPERTY_GROUPS = [
+      {
+        title: "Grid",
+        items: [
+          { id: "column_start_x", label: "Column Start X" },
+          { id: "column_gap_x", label: "Column Gap X" },
+        ],
+      },
+      {
+        title: "Card Box",
+        items: [
+          { id: "card_bounds", label: "Card Bounds" },
+        ],
+      },
+      {
+        title: "Rows",
+        items: [
+          { id: "top_row_y", label: "Top Row Y" },
+          { id: "tableau_y", label: "Tableau Y" },
+        ],
+      },
+      {
+        title: "Stack Spacing",
+        items: [
+          { id: "waste_box_origin", label: "Waste Box Origin" },
+          { id: "hidden_offset_y", label: "Hidden Offset Y" },
+          { id: "visible_offset_y", label: "Visible Offset Y" },
+          { id: "waste_overlap_x", label: "Waste Overlap X" },
+        ],
+      },
+      {
+        title: "Click Points",
+        items: [
+          { id: "stock_click", label: "Stock Click" },
+          { id: "undo_click", label: "Undo Click" },
+          { id: "submit_click", label: "Submit Click" },
+        ],
+      },
+      {
+        title: "Crop Boxes",
+        items: [
+          { id: "rank_crop_box", label: "Rank Crop Box" },
+          { id: "suit_crop_box", label: "Suit Crop Box" },
+        ],
+      },
+    ];
+
+    const LAYOUT_FIELDS = [
+      ["card width", ["layout", "card_width"], 0.001],
+      ["card height", ["layout", "card_height"], 0.001],
+      ["top row top", ["layout", "top_row_top"], 0.001],
+      ["tableau top", ["layout", "tableau_top"], 0.001],
+      ["hidden fan y", ["layout", "hidden_fan_y"], 0.001],
+      ["visible fan y", ["layout", "visible_fan_y"], 0.001],
+      ["waste x", ["layout", "waste_origin", "x"], 0.001],
+      ["waste y", ["layout", "waste_origin", "y"], 0.001],
+      ["column 1", ["layout", "column_lefts", 0], 0.001],
+      ["column 2", ["layout", "column_lefts", 1], 0.001],
+      ["column 3", ["layout", "column_lefts", 2], 0.001],
+      ["column 4", ["layout", "column_lefts", 3], 0.001],
+      ["column 5", ["layout", "column_lefts", 4], 0.001],
+      ["column 6", ["layout", "column_lefts", 5], 0.001],
+      ["column 7", ["layout", "column_lefts", 6], 0.001],
+      ["stock tap x", ["layout", "stock_tap_point", "x"], 0.001],
+      ["stock tap y", ["layout", "stock_tap_point", "y"], 0.001],
+      ["submit x", ["layout", "submit_point", "x"], 0.001],
+      ["submit y", ["layout", "submit_point", "y"], 0.001],
+      ["undo x", ["layout", "undo_point", "x"], 0.001],
+      ["undo y", ["layout", "undo_point", "y"], 0.001],
+    ];
+
+    const VISION_FIELDS = [
+      ["rank x", ["vision", "rank_rect", "x"], 0.001],
+      ["rank y", ["vision", "rank_rect", "y"], 0.001],
+      ["rank width", ["vision", "rank_rect", "width"], 0.001],
+      ["rank height", ["vision", "rank_rect", "height"], 0.001],
+      ["suit x", ["vision", "suit_rect", "x"], 0.001],
+      ["suit y", ["vision", "suit_rect", "y"], 0.001],
+      ["suit width", ["vision", "suit_rect", "width"], 0.001],
+      ["suit height", ["vision", "suit_rect", "height"], 0.001],
+      ["waste overlap", ["vision", "waste_overlap"], 0.001],
+      ["face anchor bright", ["vision", "face_anchor_bright_ratio"], 0.001],
+      ["face anchor pad px", ["vision", "face_anchor_padding_px"], 1],
+      ["face up white", ["vision", "face_up_white_ratio"], 0.001],
+      ["face down purple", ["vision", "face_down_purple_ratio"], 0.001],
+      ["recycle foreground", ["vision", "recycle_foreground_ratio"], 0.001],
+      ["center inset x", ["vision", "center_foreground_inset_x"], 0.001],
+      ["center inset y", ["vision", "center_foreground_inset_y"], 0.001],
+      ["white min rgb", ["vision", "white_min_rgb"], 1],
+      ["purple blue min", ["vision", "purple_blue_min"], 1],
+      ["purple red min", ["vision", "purple_red_min"], 1],
+      ["purple blue over green", ["vision", "purple_blue_over_green"], 1],
+      ["purple red over green", ["vision", "purple_red_over_green"], 1],
+      ["background r", ["vision", "background_rgb", 0], 1],
+      ["background g", ["vision", "background_rgb", 1], 1],
+      ["background b", ["vision", "background_rgb", 2], 1],
+      ["background distance", ["vision", "background_distance_threshold"], 1],
+    ];
+
+    const state = {
+      calibration: null,
+      defaultCalibration: null,
+      response: null,
+      selectedSlot: "",
+      activeProperty: "column_start_x",
+      toggles: {
+        slots: true,
+        focusTableau: false,
+        points: true,
+        selected: true,
+      },
+      pendingAnchor: null,
+      hoverGuide: null,
+      previewGuide: null,
+      drag: null,
+    };
+
+    const PROPERTY_DEFS = {
+      column_start_x: {
+        kind: "line_x",
+        instructions: "Click the left edge of tableau column 1.",
+        apply(point) {
+          applyColumnGrid(point.nx, currentColumnGap());
+        },
+      },
+      column_gap_x: {
+        kind: "distance_x",
+        instructions: "Click the left edge of column 1, then the left edge of column 2.",
+        apply(anchor, point) {
+          applyColumnGrid(state.calibration.layout.column_lefts[0], Math.abs(point.nx - anchor.nx));
+        },
+      },
+      card_bounds: {
+        kind: "rect",
+        instructions: "Drag from the top-left to the bottom-right of a single card.",
+        apply(rect) {
+          state.calibration.layout.card_width = clamp(rect.width, 0.02, 0.5);
+          state.calibration.layout.card_height = clamp(rect.height, 0.02, 0.5);
+        },
+      },
+      top_row_y: {
+        kind: "line_y",
+        instructions: "Click the top edge of any top-row slot.",
+        apply(point) {
+          state.calibration.layout.top_row_top = clamp(point.ny, 0, 1);
+        },
+      },
+      tableau_y: {
+        kind: "line_y",
+        instructions: "Click the top edge of tableau column 1.",
+        apply(point) {
+          state.calibration.layout.tableau_top = clamp(point.ny, 0, 1);
+        },
+      },
+      hidden_offset_y: {
+        kind: "distance_y",
+        instructions: "Click the top edge of one hidden card, then the next hidden card below it.",
+        apply(anchor, point) {
+          state.calibration.layout.hidden_fan_y = clamp(Math.abs(point.ny - anchor.ny), 0, 0.25);
+        },
+      },
+      visible_offset_y: {
+        kind: "distance_y",
+        instructions: "Click the top edge of one visible card, then the next visible card below it.",
+        apply(anchor, point) {
+          state.calibration.layout.visible_fan_y = clamp(Math.abs(point.ny - anchor.ny), 0, 0.25);
+        },
+      },
+      waste_overlap_x: {
+        kind: "distance_x",
+        instructions: "Click the left edge of one visible waste card, then the next visible waste card.",
+        apply(anchor, point) {
+          const width = Math.max(state.calibration.layout.card_width, 0.0001);
+          state.calibration.vision.waste_overlap = clamp(Math.abs(point.nx - anchor.nx) / width, 0, 2);
+        },
+      },
+      waste_box_origin: {
+        kind: "point",
+        instructions: "Click the top-left corner of the leftmost visible waste card.",
+        apply(point) {
+          state.calibration.layout.waste_origin.x = point.nx;
+          state.calibration.layout.waste_origin.y = point.ny;
+        },
+      },
+      stock_click: {
+        kind: "point",
+        instructions: "Click the stock tap point.",
+        apply(point) {
+          state.calibration.layout.stock_tap_point.x = point.nx;
+          state.calibration.layout.stock_tap_point.y = point.ny;
+        },
+      },
+      undo_click: {
+        kind: "point",
+        instructions: "Click the undo tap point.",
+        apply(point) {
+          state.calibration.layout.undo_point.x = point.nx;
+          state.calibration.layout.undo_point.y = point.ny;
+        },
+      },
+      submit_click: {
+        kind: "point",
+        instructions: "Click the submit tap point.",
+        apply(point) {
+          state.calibration.layout.submit_point.x = point.nx;
+          state.calibration.layout.submit_point.y = point.ny;
+        },
+      },
+      rank_crop_box: {
+        kind: "crop_rect",
+        instructions: "Select a face-up slot, then drag the rank crop box inside that card.",
+        apply(rect) {
+          updateCropRect("rank_rect", rect);
+        },
+      },
+      suit_crop_box: {
+        kind: "crop_rect",
+        instructions: "Select a face-up slot, then drag the suit crop box inside that card.",
+        apply(rect) {
+          updateCropRect("suit_rect", rect);
+        },
+      },
+    };
+
+    function $(id) {
+      return document.getElementById(id);
+    }
+
+    function deepClone(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+
+    function getAtPath(obj, path) {
+      return path.reduce((current, key) => current[key], obj);
+    }
+
+    function setAtPath(obj, path, value) {
+      const target = path.slice(0, -1).reduce((current, key) => current[key], obj);
+      target[path[path.length - 1]] = value;
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function toCanvasX(norm) {
+      return norm * canvas.width;
+    }
+
+    function toCanvasY(norm) {
+      return norm * canvas.height;
+    }
+
+    function fromCanvasPoint(event) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const x = (event.clientX - rect.left) * scaleX;
+      const y = (event.clientY - rect.top) * scaleY;
+      return {
+        x,
+        y,
+        nx: clamp(x / canvas.width, 0, 1),
+        ny: clamp(y / canvas.height, 0, 1),
+      };
+    }
+
+    function rectFromPoints(a, b) {
+      const left = Math.min(a.nx, b.nx);
+      const top = Math.min(a.ny, b.ny);
+      const right = Math.max(a.nx, b.nx);
+      const bottom = Math.max(a.ny, b.ny);
+      return {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+      };
+    }
+
+    function absoluteRect(rect) {
+      return {
+        x: toCanvasX(rect.x),
+        y: toCanvasY(rect.y),
+        width: toCanvasX(rect.width),
+        height: toCanvasY(rect.height),
+      };
+    }
+
+    function currentColumnGap() {
+      const columns = state.calibration.layout.column_lefts;
+      return Math.abs((columns[1] ?? 0) - (columns[0] ?? 0));
+    }
+
+    function applyColumnGrid(startX, gapX) {
+      for (let index = 0; index < state.calibration.layout.column_lefts.length; index += 1) {
+        state.calibration.layout.column_lefts[index] = clamp(startX + gapX * index, 0, 1);
+      }
+    }
+
+    function selectedFaceRect() {
+      return state.response?.selected_slot?.face_rect || null;
+    }
+
+    function updateCropRect(field, absoluteRectValue) {
+      const face = selectedFaceRect();
+      if (!face) return;
+      const relative = {
+        x: clamp((absoluteRectValue.x - face.x) / face.width, 0, 1),
+        y: clamp((absoluteRectValue.y - face.y) / face.height, 0, 1),
+        width: clamp(absoluteRectValue.width / face.width, 0.01, 1),
+        height: clamp(absoluteRectValue.height / face.height, 0.01, 1),
+      };
+      state.calibration.vision[field] = relative;
+    }
+
+    function createControls(containerId, definitions) {
+      const container = $(containerId);
+      definitions.forEach(([label, path, step]) => {
+        const key = path.join(".");
+        const text = document.createElement("label");
+        text.textContent = label;
+        text.htmlFor = key;
+        const input = document.createElement("input");
+        input.type = "number";
+        input.step = String(step);
+        input.id = key;
+        input.addEventListener("input", () => {
+          const raw = input.value.trim();
+          if (raw === "") return;
+          const next = step >= 1 ? Math.round(Number(raw)) : Number(raw);
+          if (Number.isFinite(next)) {
+            setAtPath(state.calibration, path, next);
+            preview();
+          }
+        });
+        container.appendChild(text);
+        container.appendChild(input);
+      });
+    }
+
+    function createPropertyPicker() {
+      const container = $("propertyGroups");
+      container.innerHTML = "";
+      PROPERTY_GROUPS.forEach((group) => {
+        const wrapper = document.createElement("div");
+        wrapper.className = "property-group";
+        const title = document.createElement("div");
+        title.className = "property-group-title";
+        title.textContent = group.title;
+        wrapper.appendChild(title);
+        const buttons = document.createElement("div");
+        buttons.className = "property-buttons";
+        group.items.forEach((item) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = item.label;
+          button.dataset.property = item.id;
+          button.addEventListener("click", () => {
+            state.activeProperty = item.id;
+            clearInteractionState();
+            updatePropertyButtons();
+            updateInstructionText();
+            render();
+          });
+          buttons.appendChild(button);
+        });
+        wrapper.appendChild(buttons);
+        container.appendChild(wrapper);
+      });
+    }
+
+    function updatePropertyButtons() {
+      document.querySelectorAll("[data-property]").forEach((button) => {
+        button.classList.toggle("active", button.dataset.property === state.activeProperty);
+      });
+    }
+
+    function syncControlValues() {
+      [...LAYOUT_FIELDS, ...VISION_FIELDS].forEach(([, path]) => {
+        const input = $(path.join("."));
+        if (!input) return;
+        const value = getAtPath(state.calibration, path);
+        input.value = typeof value === "number"
+          ? value.toFixed(path.includes("padding_px") || path.includes("rgb") || path.includes("threshold") ? 0 : 6)
+          : value;
+      });
+    }
+
+    function slotOptions() {
+      return (state.response?.slots || []).filter((slot) => slot.state === "FaceUp");
+    }
+
+    function syncSlotSelect() {
+      const select = $("slotSelect");
+      const slots = slotOptions();
+      select.innerHTML = "";
+      const empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = slots.length ? "None" : "No face-up slots";
+      select.appendChild(empty);
+      slots.forEach((slot) => {
+        const option = document.createElement("option");
+        option.value = slot.label;
+        option.textContent = slot.label + (slot.card ? ` (${slot.card})` : "");
+        select.appendChild(option);
+      });
+      if (slots.length && !slots.some((slot) => slot.label === state.selectedSlot)) {
+        state.selectedSlot = slots[0].label;
+      }
+      select.value = state.selectedSlot;
+    }
+
+    function debounce(fn, delay) {
+      let timeout = null;
+      return () => {
+        clearTimeout(timeout);
+        timeout = setTimeout(fn, delay);
+      };
+    }
+
+    async function fetchJson(path, options) {
+      const response = await fetch(path, options);
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      return response.json();
+    }
+
+    async function init() {
+      createPropertyPicker();
+      createControls("layoutControls", LAYOUT_FIELDS);
+      createControls("visionControls", VISION_FIELDS);
+      bindUI();
+      const initial = await fetchJson("/api/init");
+      state.calibration = deepClone(initial.calibration);
+      state.defaultCalibration = deepClone(initial.calibration);
+      state.response = initial;
+      syncSlotSelect();
+      syncControlValues();
+      updatePropertyButtons();
+      updateInstructionText();
+      await previewNow();
+    }
+
+    const preview = debounce(previewNow, 100);
+
+    async function previewNow() {
+      if (!state.calibration) return;
+      setStatus("Recomputing preview…");
+      const response = await fetchJson("/api/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          calibration: state.calibration,
+          selected_slot: state.selectedSlot || null,
+        }),
+      });
+      state.response = response;
+      if (!state.selectedSlot) {
+        const first = slotOptions()[0];
+        if (first) {
+          state.selectedSlot = first.label;
+          syncSlotSelect();
+          return previewNow();
+        }
+      }
+      syncSlotSelect();
+      syncControlValues();
+      updateSidebar();
+      updateInstructionText();
+      resizeCanvas();
+      render();
+      setStatus("Preview updated.");
+    }
+
+    function bindUI() {
+      $("slotSelect").addEventListener("change", (event) => {
+        state.selectedSlot = event.target.value;
+        clearInteractionState();
+        preview();
+      });
+      $("toggleSlots").addEventListener("change", (event) => {
+        state.toggles.slots = event.target.checked;
+        render();
+      });
+      $("focusTableau").addEventListener("change", (event) => {
+        state.toggles.focusTableau = event.target.checked;
+        render();
+      });
+      $("togglePoints").addEventListener("change", (event) => {
+        state.toggles.points = event.target.checked;
+        render();
+      });
+      $("toggleSelected").addEventListener("change", (event) => {
+        state.toggles.selected = event.target.checked;
+        render();
+      });
+      $("resetBtn").addEventListener("click", () => {
+        state.calibration = deepClone(state.defaultCalibration);
+        clearInteractionState();
+        preview();
+      });
+      $("copyBtn").addEventListener("click", async () => {
+        await navigator.clipboard.writeText($("exportText").value);
+        setStatus("Calibration copied to clipboard.");
+      });
+      image.addEventListener("load", () => {
+        resizeCanvas();
+        render();
+      });
+      window.addEventListener("resize", () => {
+        resizeCanvas();
+        render();
+      });
+      canvas.addEventListener("mousedown", onCanvasMouseDown);
+      canvas.addEventListener("mousemove", onCanvasMouseMove);
+      window.addEventListener("mouseup", onCanvasMouseUp);
+      canvas.addEventListener("mouseleave", () => {
+        state.hoverGuide = null;
+        if (!state.drag) {
+          render();
+        }
+      });
+    }
+
+    function resizeCanvas() {
+      if (!state.response) return;
+      const containerWidth = canvas.parentElement.clientWidth - 4;
+      const scale = Math.min(1, containerWidth / state.response.image_width);
+      canvas.width = Math.round(state.response.image_width * scale);
+      canvas.height = Math.round(state.response.image_height * scale);
+    }
+
+    function updateSidebar() {
+      if (!state.response) return;
+      $("exportText").value = state.response.export_rust;
+      $("boardSummary").textContent = [
+        `foundation: ${state.response.board_summary.foundation.join(", ")}`,
+        `waste: [${state.response.board_summary.waste_visible.join(", ")}]`,
+        `stock_present: ${state.response.board_summary.stock_present}`,
+        ...state.response.board_summary.piles.map((pile, idx) =>
+          `pile ${idx + 1}: hidden=${pile.hidden_count} visible=[${pile.visible_cards.join(", ")}]`
+        ),
+      ].join("\n");
+
+      const selected = state.response.selected_slot;
+      $("rankRawImg").src = selected?.rank_raw_url || "";
+      $("rankMaskImg").src = selected?.rank_mask_url || "";
+      $("suitRawImg").src = selected?.suit_raw_url || "";
+      $("suitMaskImg").src = selected?.suit_mask_url || "";
+      $("candidateText").textContent = selected
+        ? [
+            selected.label,
+            `rank: ${formatCandidates(selected.rank_candidates)}`,
+            `suit: ${formatCandidates(selected.suit_candidates)}`,
+          ].join("\n")
+        : "Select a face-up slot to preview rank/suit crop boxes.";
+    }
+
+    function updateInstructionText() {
+      const property = PROPERTY_DEFS[state.activeProperty];
+      const pending = state.pendingAnchor
+        ? `\nWaiting for the second click for ${humanizeProperty(state.activeProperty)}.`
+        : "";
+      const slotWarning = (property.kind === "crop_rect" && !selectedFaceRect())
+        ? "\nSelect a face-up slot first."
+        : "";
+      $("instructionText").textContent = `${humanizeProperty(state.activeProperty)}\n${property.instructions}${pending}${slotWarning}`;
+    }
+
+    function humanizeProperty(id) {
+      return id.replaceAll("_", " ");
+    }
+
+    function formatCandidates(candidates) {
+      return candidates
+        .slice(0, 4)
+        .map((candidate) => `${candidate.label}:${candidate.score.toFixed(3)}`)
+        .join(", ");
+    }
+
+    function setStatus(text) {
+      $("statusText").textContent = text;
+    }
+
+    function clearInteractionState() {
+      state.pendingAnchor = null;
+      state.hoverGuide = null;
+      state.previewGuide = null;
+      state.drag = null;
+    }
+
+    function onCanvasMouseDown(event) {
+      if (!state.response) return;
+      const point = fromCanvasPoint(event);
+      const property = PROPERTY_DEFS[state.activeProperty];
+      if (!property) return;
+
+      if (property.kind === "rect" || property.kind === "crop_rect") {
+        if (property.kind === "crop_rect" && !selectedFaceRect()) {
+          setStatus("Select a face-up slot before editing crop boxes.");
+          return;
+        }
+        state.drag = {
+          propertyId: state.activeProperty,
+          anchor: point,
+        };
+        state.previewGuide = { kind: property.kind, anchor: point, current: point };
+        render();
+        return;
+      }
+
+      if (property.kind === "point" || property.kind === "line_x" || property.kind === "line_y") {
+        property.apply(point);
+        clearInteractionState();
+        syncControlValues();
+        preview();
+        return;
+      }
+
+      if (property.kind === "distance_x" || property.kind === "distance_y") {
+        if (!state.pendingAnchor) {
+          state.pendingAnchor = point;
+          state.previewGuide = { kind: property.kind, anchor: point, current: point };
+          updateInstructionText();
+          render();
+        } else {
+          property.apply(state.pendingAnchor, point);
+          clearInteractionState();
+          syncControlValues();
+          updateInstructionText();
+          preview();
+        }
+      }
+    }
+
+    function onCanvasMouseMove(event) {
+      if (!state.response) return;
+      const point = fromCanvasPoint(event);
+      const property = PROPERTY_DEFS[state.activeProperty];
+      state.hoverGuide = { kind: property.kind, point };
+
+      if (state.drag) {
+        state.previewGuide = {
+          kind: state.drag.propertyId,
+          anchor: state.drag.anchor,
+          current: point,
+        };
+      } else if (state.pendingAnchor) {
+        state.previewGuide = {
+          kind: property.kind,
+          anchor: state.pendingAnchor,
+          current: point,
+        };
+      } else {
+        state.previewGuide = null;
+      }
+
+      render();
+    }
+
+    function onCanvasMouseUp(event) {
+      if (!state.drag) return;
+      const point = fromCanvasPoint(event);
+      const property = PROPERTY_DEFS[state.drag.propertyId];
+      const rect = rectFromPoints(state.drag.anchor, point);
+      property.apply(rect);
+      clearInteractionState();
+      syncControlValues();
+      preview();
+    }
+
+    function render() {
+      if (!state.response || !image.complete || !canvas.width || !canvas.height) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+      if (state.toggles.slots) {
+        drawSlots();
+      }
+      if (state.toggles.points) {
+        drawPoints();
+      }
+      if (state.toggles.selected) {
+        drawSelectedPreview();
+      }
+      drawPropertyGuide();
+      drawPreviewGuide();
+    }
+
+    function drawSlots() {
+      const activePilePrefix = state.toggles.focusTableau && state.selectedSlot.startsWith("pile-")
+        ? state.selectedSlot.split("-").slice(0, 2).join("-") + "-"
+        : null;
+      for (const slot of state.response.slots) {
+        const isTableau = slot.label.startsWith("pile-");
+        if (activePilePrefix && isTableau && !slot.label.startsWith(activePilePrefix)) {
+          continue;
+        }
+        const colors = {
+          Empty: "rgba(120,180,120,0.9)",
+          FaceDown: "rgba(180,90,255,0.9)",
+          FaceUp: "rgba(255,255,255,0.92)",
+          Recycle: "rgba(255,193,80,0.95)",
+        };
+        const rect = absoluteRect(slot.rect);
+        ctx.strokeStyle = colors[slot.state] || "rgba(255,255,255,0.75)";
+        ctx.lineWidth = slot.label === state.selectedSlot ? 3 : 2;
+        ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+        ctx.fillStyle = "rgba(0,0,0,0.55)";
+        ctx.fillRect(rect.x, rect.y - 18, Math.max(92, rect.width), 18);
+        ctx.fillStyle = "#f4fff6";
+        ctx.font = "12px SFMono-Regular, Menlo, monospace";
+        ctx.fillText(slot.label, rect.x + 4, rect.y - 5);
+      }
+    }
+
+    function drawPoints() {
+      const points = [
+        ["stock", state.calibration.layout.stock_tap_point, "#ffd166"],
+        ["submit", state.calibration.layout.submit_point, "#8be9fd"],
+        ["undo", state.calibration.layout.undo_point, "#ff79c6"],
+      ];
+      for (const [label, point, color] of points) {
+        drawPoint(point, color, label);
+      }
+    }
+
+    function drawSelectedPreview() {
+      const selected = state.response.selected_slot;
+      if (!selected) return;
+      drawRect(selected.face_rect, "rgba(80,220,160,0.95)", 2);
+      drawRect(selected.rank_rect, "rgba(255,114,118,0.95)", 2);
+      drawRect(selected.suit_rect, "rgba(142,229,238,0.95)", 2);
+    }
+
+    function drawPropertyGuide() {
+      const layout = state.calibration.layout;
+      const selected = state.response.selected_slot;
+      switch (state.activeProperty) {
+        case "column_start_x":
+          drawVerticalGuide(layout.column_lefts[0], "rgba(168,255,159,0.95)");
+          break;
+        case "column_gap_x":
+          drawVerticalGuide(layout.column_lefts[0], "rgba(168,255,159,0.95)");
+          drawVerticalGuide(layout.column_lefts[1], "rgba(168,255,159,0.75)");
+          break;
+        case "card_bounds":
+          drawRect({
+            x: layout.column_lefts[0],
+            y: layout.top_row_top,
+            width: layout.card_width,
+            height: layout.card_height,
+          }, "rgba(168,255,159,0.95)", 3);
+          break;
+        case "top_row_y":
+          drawHorizontalGuide(layout.top_row_top, "rgba(168,255,159,0.95)");
+          break;
+        case "tableau_y":
+          drawHorizontalGuide(layout.tableau_top, "rgba(168,255,159,0.95)");
+          break;
+        case "hidden_offset_y":
+          drawHorizontalGuide(layout.tableau_top, "rgba(168,255,159,0.95)");
+          drawHorizontalGuide(layout.tableau_top + layout.hidden_fan_y, "rgba(168,255,159,0.75)");
+          break;
+        case "visible_offset_y":
+          drawHorizontalGuide(layout.tableau_top + layout.hidden_fan_y, "rgba(168,255,159,0.95)");
+          drawHorizontalGuide(layout.tableau_top + layout.hidden_fan_y + layout.visible_fan_y, "rgba(168,255,159,0.75)");
+          break;
+        case "waste_overlap_x": {
+          const slotA = state.response.slots.find((slot) => slot.label === "waste-1");
+          const slotB = state.response.slots.find((slot) => slot.label === "waste-2");
+          if (slotA) drawVerticalGuide(slotA.rect.x, "rgba(255,209,102,0.95)");
+          if (slotB) drawVerticalGuide(slotB.rect.x, "rgba(255,209,102,0.75)");
+          break;
+        }
+        case "waste_box_origin":
+          drawRect({
+            x: state.calibration.layout.waste_origin.x,
+            y: state.calibration.layout.waste_origin.y,
+            width: state.calibration.layout.card_width,
+            height: state.calibration.layout.card_height,
+          }, "rgba(255,209,102,0.95)", 3);
+          break;
+        case "stock_click":
+          drawPoint(layout.stock_tap_point, "#ffd166", "stock");
+          break;
+        case "undo_click":
+          drawPoint(layout.undo_point, "#ff79c6", "undo");
+          break;
+        case "submit_click":
+          drawPoint(layout.submit_point, "#8be9fd", "submit");
+          break;
+        case "rank_crop_box":
+          if (selected) {
+            drawRect(selected.face_rect, "rgba(80,220,160,0.95)", 2);
+            drawRect(selected.rank_rect, "rgba(255,114,118,0.95)", 3);
+          }
+          break;
+        case "suit_crop_box":
+          if (selected) {
+            drawRect(selected.face_rect, "rgba(80,220,160,0.95)", 2);
+            drawRect(selected.suit_rect, "rgba(142,229,238,0.95)", 3);
+          }
+          break;
+      }
+    }
+
+    function drawPreviewGuide() {
+      if (state.previewGuide?.kind === "rect" || state.previewGuide?.kind === "crop_rect") {
+        const rect = rectFromPoints(state.previewGuide.anchor, state.previewGuide.current);
+        drawRect(rect, "rgba(255,255,255,0.9)", 2, [8, 4]);
+        return;
+      }
+
+      if (state.previewGuide?.kind === "distance_x") {
+        drawVerticalGuide(state.previewGuide.anchor.nx, "rgba(255,255,255,0.95)");
+        drawVerticalGuide(state.previewGuide.current.nx, "rgba(255,255,255,0.75)");
+        drawConnector(state.previewGuide.anchor.nx, state.previewGuide.current.nx, state.previewGuide.current.ny, "rgba(255,255,255,0.85)");
+        return;
+      }
+
+      if (state.previewGuide?.kind === "distance_y") {
+        drawHorizontalGuide(state.previewGuide.anchor.ny, "rgba(255,255,255,0.95)");
+        drawHorizontalGuide(state.previewGuide.current.ny, "rgba(255,255,255,0.75)");
+        drawVerticalConnector(state.previewGuide.anchor.ny, state.previewGuide.current.ny, state.previewGuide.current.nx, "rgba(255,255,255,0.85)");
+        return;
+      }
+
+      if (state.hoverGuide) {
+        if (state.hoverGuide.kind === "line_x") {
+          drawVerticalGuide(state.hoverGuide.point.nx, "rgba(255,255,255,0.6)");
+        } else if (state.hoverGuide.kind === "line_y") {
+          drawHorizontalGuide(state.hoverGuide.point.ny, "rgba(255,255,255,0.6)");
+        } else if (state.hoverGuide.kind === "point") {
+          drawPoint({ x: state.hoverGuide.point.nx, y: state.hoverGuide.point.ny }, "rgba(255,255,255,0.8)");
+        }
+      }
+    }
+
+    function drawRect(rect, color, width, dash = []) {
+      const absolute = absoluteRect(rect);
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.setLineDash(dash);
+      ctx.strokeRect(absolute.x, absolute.y, absolute.width, absolute.height);
+      ctx.restore();
+    }
+
+    function drawVerticalGuide(nx, color) {
+      const x = toCanvasX(nx);
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, canvas.height);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawHorizontalGuide(ny, color) {
+      const y = toCanvasY(ny);
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(canvas.width, y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawConnector(nxA, nxB, ny, color) {
+      const x1 = toCanvasX(nxA);
+      const x2 = toCanvasX(nxB);
+      const y = toCanvasY(ny);
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x1, y);
+      ctx.lineTo(x2, y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawVerticalConnector(nyA, nyB, nx, color) {
+      const y1 = toCanvasY(nyA);
+      const y2 = toCanvasY(nyB);
+      const x = toCanvasX(nx);
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x, y1);
+      ctx.lineTo(x, y2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawPoint(point, color, label = "") {
+      const x = toCanvasX(point.x);
+      const y = toCanvasY(point.y);
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(x, y, 7, 0, Math.PI * 2);
+      ctx.fill();
+      if (label) {
+        ctx.fillStyle = "#08130d";
+        ctx.font = "12px SFMono-Regular, Menlo, monospace";
+        ctx.fillText(label, x + 10, y - 10);
+      }
+      ctx.restore();
+    }
+
+    init().catch((error) => {
+      console.error(error);
+      setStatus(String(error));
+    });
+  </script>
+</body>
+</html>

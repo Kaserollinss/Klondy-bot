@@ -3,6 +3,7 @@ __pycache__
 .vscode
 log*
 test.json
+/debug
 
 # Added by cargo
 

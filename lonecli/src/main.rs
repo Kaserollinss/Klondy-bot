@@ -1,7 +1,10 @@
 mod solvitaire;
+mod screenshot_debug;
+mod calibration_tool;
 #[allow(dead_code)]
 mod tui;
 
+use calibration_tool::{run_solitaire_cash_calibration, CalibrateSolitaireCashArgs};
 use bpci::{Interval, NSuccessesSample, WilsonScore};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use loneadapter::adapters::solitaire_cash::SolitaireCashAdapter;
@@ -19,6 +22,10 @@ use lonelybot::solver::{solve_with_tracking, SearchResult};
 use lonelybot::state::Solitaire;
 use lonelybot::tracking::{BudgetedTerminateSignal, DefaultTerminateSignal, EmptySearchStats};
 use rand::prelude::*;
+use screenshot_debug::{
+    run_solitaire_cash_inspect, run_solitaire_cash_validate, InspectSolitaireCashArgs,
+    ValidateSolitaireCashTemplatesArgs,
+};
 use solvitaire::Solvitaire;
 use std::num::NonZeroU8;
 use std::path::PathBuf;
@@ -256,6 +263,9 @@ enum Commands {
 #[derive(Subcommand)]
 enum ScreenCommands {
     SolitaireCash(ScreenSolitaireCashArgs),
+    InspectSolitaireCash(InspectSolitaireCashArgs),
+    ValidateSolitaireCashTemplates(ValidateSolitaireCashTemplatesArgs),
+    CalibrateSolitaireCash(CalibrateSolitaireCashArgs),
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -268,11 +278,11 @@ enum ScreenMode {
 struct ScreenSolitaireCashArgs {
     #[arg(long, default_value_t = 0)]
     x: u32,
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 36)]
     y: u32,
-    #[arg(long, default_value_t = 640)]
+    #[arg(long, default_value_t = 730)]
     width: u32,
-    #[arg(long, default_value_t = 980)]
+    #[arg(long, default_value_t = 1070)]
     height: u32,
     #[arg(long, value_enum, default_value_t = ScreenMode::Advisor)]
     mode: ScreenMode,
@@ -393,6 +403,24 @@ fn main() {
         Commands::Screen { game } => match game {
             ScreenCommands::SolitaireCash(args) => {
                 if let Err(err) = run_solitaire_cash_screen(args) {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            ScreenCommands::InspectSolitaireCash(args) => {
+                if let Err(err) = run_solitaire_cash_inspect(args) {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            ScreenCommands::ValidateSolitaireCashTemplates(args) => {
+                if let Err(err) = run_solitaire_cash_validate(args) {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            ScreenCommands::CalibrateSolitaireCash(args) => {
+                if let Err(err) = run_solitaire_cash_calibration(args) {
                     eprintln!("error: {err}");
                     std::process::exit(1);
                 }

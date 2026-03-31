@@ -6,20 +6,51 @@ use lonelybot::card::{Card, N_SUITS};
 use lonelybot::deck::{N_DECK_CARDS, N_PILES};
 use lonelybot::partial::PartialBoard;
 use lonelybot::standard::{PileVec, Pos, StandardMove};
+use serde::{Deserialize, Serialize};
 
 use crate::adapter::{AdapterError, ScreenAdapter};
 
 const DRAW_STEP: u8 = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
 }
 
 impl Point {
-    const fn new(x: f32, y: f32) -> Self {
+    pub const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
+    }
+
+    pub fn to_rust_literal(&self) -> String {
+        format!("Point {{ x: {:.6}, y: {:.6} }}", self.x, self.y)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct NormalizedRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl NormalizedRect {
+    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    pub fn to_rust_literal(&self) -> String {
+        format!(
+            "NormalizedRect {{ x: {:.6}, y: {:.6}, width: {:.6}, height: {:.6} }}",
+            self.x, self.y, self.width, self.height
+        )
     }
 }
 
@@ -77,43 +108,161 @@ pub trait SolitaireCashBackend {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct SolitaireCashLayout {
-    pub(crate) column_lefts: [f32; N_PILES as usize],
-    pub(crate) card_width: f32,
-    pub(crate) card_height: f32,
-    pub(crate) top_row_top: f32,
-    pub(crate) tableau_top: f32,
-    pub(crate) hidden_fan_y: f32,
-    pub(crate) visible_fan_y: f32,
-    stock_tap_point: Point,
-    submit_point: Point,
-    undo_point: Point,
+    pub column_lefts: [f32; N_PILES as usize],
+    pub card_width: f32,
+    pub card_height: f32,
+    pub top_row_top: f32,
+    pub tableau_top: f32,
+    pub hidden_fan_y: f32,
+    pub visible_fan_y: f32,
+    pub waste_origin: Point,
+    pub stock_tap_point: Point,
+    pub submit_point: Point,
+    pub undo_point: Point,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SolitaireCashVisionCalibration {
+    pub rank_rect: NormalizedRect,
+    pub suit_rect: NormalizedRect,
+    pub waste_overlap: f32,
+    pub face_anchor_bright_ratio: f32,
+    pub face_anchor_padding_px: u32,
+    pub face_up_white_ratio: f32,
+    pub face_down_purple_ratio: f32,
+    pub recycle_foreground_ratio: f32,
+    pub center_foreground_inset_x: f32,
+    pub center_foreground_inset_y: f32,
+    pub white_min_rgb: u8,
+    pub purple_blue_min: u8,
+    pub purple_red_min: u8,
+    pub purple_blue_over_green: i32,
+    pub purple_red_over_green: i32,
+    pub background_rgb: [u8; 3],
+    pub background_distance_threshold: i32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SolitaireCashCalibration {
+    pub layout: SolitaireCashLayout,
+    pub vision: SolitaireCashVisionCalibration,
+}
+
+impl SolitaireCashLayout {
+    pub fn to_rust_literal(&self) -> String {
+        format!(
+            "SolitaireCashLayout {{\n            column_lefts: [{}, {}, {}, {}, {}, {}, {}],\n            card_width: {:.6},\n            card_height: {:.6},\n            top_row_top: {:.6},\n            tableau_top: {:.6},\n            hidden_fan_y: {:.6},\n            visible_fan_y: {:.6},\n            waste_origin: {},\n            stock_tap_point: {},\n            submit_point: {},\n            undo_point: {},\n        }}",
+            self.column_lefts[0],
+            self.column_lefts[1],
+            self.column_lefts[2],
+            self.column_lefts[3],
+            self.column_lefts[4],
+            self.column_lefts[5],
+            self.column_lefts[6],
+            self.card_width,
+            self.card_height,
+            self.top_row_top,
+            self.tableau_top,
+            self.hidden_fan_y,
+            self.visible_fan_y,
+            self.waste_origin.to_rust_literal(),
+            self.stock_tap_point.to_rust_literal(),
+            self.submit_point.to_rust_literal(),
+            self.undo_point.to_rust_literal(),
+        )
+    }
+}
+
+impl SolitaireCashVisionCalibration {
+    pub fn to_rust_literal(&self) -> String {
+        format!(
+            "SolitaireCashVisionCalibration {{\n            rank_rect: {},\n            suit_rect: {},\n            waste_overlap: {:.6},\n            face_anchor_bright_ratio: {:.6},\n            face_anchor_padding_px: {},\n            face_up_white_ratio: {:.6},\n            face_down_purple_ratio: {:.6},\n            recycle_foreground_ratio: {:.6},\n            center_foreground_inset_x: {:.6},\n            center_foreground_inset_y: {:.6},\n            white_min_rgb: {},\n            purple_blue_min: {},\n            purple_red_min: {},\n            purple_blue_over_green: {},\n            purple_red_over_green: {},\n            background_rgb: [{}, {}, {}],\n            background_distance_threshold: {},\n        }}",
+            self.rank_rect.to_rust_literal(),
+            self.suit_rect.to_rust_literal(),
+            self.waste_overlap,
+            self.face_anchor_bright_ratio,
+            self.face_anchor_padding_px,
+            self.face_up_white_ratio,
+            self.face_down_purple_ratio,
+            self.recycle_foreground_ratio,
+            self.center_foreground_inset_x,
+            self.center_foreground_inset_y,
+            self.white_min_rgb,
+            self.purple_blue_min,
+            self.purple_red_min,
+            self.purple_blue_over_green,
+            self.purple_red_over_green,
+            self.background_rgb[0],
+            self.background_rgb[1],
+            self.background_rgb[2],
+            self.background_distance_threshold,
+        )
+    }
+}
+
+impl SolitaireCashCalibration {
+    pub fn to_rust_literal(&self) -> String {
+        format!(
+            "SolitaireCashCalibration {{\n        layout: {},\n        vision: {},\n    }}",
+            self.layout.to_rust_literal(),
+            self.vision.to_rust_literal(),
+        )
+    }
+}
+
+impl Default for SolitaireCashCalibration {
+    fn default() -> Self {
+        Self {
+            layout: SolitaireCashLayout {
+                // Normalized from the mirrored macOS capture geometry (1280 x 1960).
+                column_lefts: [
+                    0.096875,
+                    0.2125,
+                    0.328125,
+                    0.44375,
+                    0.559375,
+                    0.675,
+                    0.790625,
+                ],
+                card_width: 0.112134,
+                card_height: 0.110296,
+                top_row_top: 0.233735,
+                tableau_top: 0.420609,
+                hidden_fan_y: 0.015430,
+                visible_fan_y: 0.029592,
+                waste_origin: Point::new(0.582122, 0.235524),
+                stock_tap_point: Point::new(0.837657, 0.287454),
+                submit_point: Point::new(0.203347, 0.948085),
+                undo_point: Point::new(0.800000, 0.950942),
+            },
+            vision: SolitaireCashVisionCalibration {
+                rank_rect: NormalizedRect::new(0.044975, 0.021880, 0.326308, 0.235974),
+                suit_rect: NormalizedRect::new(0.593622, 0.013222, 0.379428, 0.230731),
+                waste_overlap: 0.358209,
+                face_anchor_bright_ratio: 0.15,
+                face_anchor_padding_px: 2,
+                face_up_white_ratio: 0.40,
+                face_down_purple_ratio: 0.08,
+                recycle_foreground_ratio: 0.03,
+                center_foreground_inset_x: 0.25,
+                center_foreground_inset_y: 0.25,
+                white_min_rgb: 220,
+                purple_blue_min: 90,
+                purple_red_min: 70,
+                purple_blue_over_green: 20,
+                purple_red_over_green: 10,
+                background_rgb: [46, 104, 62],
+                background_distance_threshold: 45,
+            },
+        }
+    }
 }
 
 impl Default for SolitaireCashLayout {
     fn default() -> Self {
-        Self {
-            // Normalized from the mirrored macOS capture geometry (1280 x 1960).
-            column_lefts: [
-                124.0 / 1280.0,
-                272.0 / 1280.0,
-                420.0 / 1280.0,
-                568.0 / 1280.0,
-                716.0 / 1280.0,
-                864.0 / 1280.0,
-                1012.0 / 1280.0,
-            ],
-            card_width: 150.0 / 1280.0,
-            card_height: 207.0 / 1960.0,
-            top_row_top: 521.0 / 1960.0,
-            tableau_top: 883.0 / 1960.0,
-            hidden_fan_y: 28.0 / 1960.0,
-            visible_fan_y: 58.0 / 1960.0,
-            stock_tap_point: Point::new(615.0 / 640.0, 350.0 / 980.0),
-            submit_point: Point::new(0.202, 0.935),
-            undo_point: Point::new(0.798, 0.935),
-        }
+        SolitaireCashCalibration::default().layout
     }
 }
 
@@ -134,7 +283,10 @@ impl SolitaireCashLayout {
     }
 
     pub(crate) fn waste_point(&self) -> Point {
-        self.card_center(4, self.top_row_top)
+        Point::new(
+            self.waste_origin.x + self.card_width / 2.0,
+            self.waste_origin.y + self.card_height / 2.0,
+        )
     }
 
     pub(crate) fn undo_point(&self) -> Point {

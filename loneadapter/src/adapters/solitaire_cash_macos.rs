@@ -1,22 +1,23 @@
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
 use arrayvec::ArrayVec;
-use image::imageops::FilterType;
-use image::{DynamicImage, GrayImage};
+use image::{DynamicImage, GrayImage, ImageFormat, Rgba, RgbaImage};
 use lonelybot::card::{Card, N_SUITS};
-use lonelybot::deck::{N_DECK_CARDS, N_PILES};
-use lonelybot::partial::parse_card;
+use lonelybot::deck::N_DECK_CARDS;
 use lonelybot::standard::PileVec;
 
 use crate::adapter::AdapterError;
 
 use super::solitaire_cash::{
-    ObservedBoard, ObservedPile, Point, SolitaireCashBackend, SolitaireCashLayout,
+    NormalizedRect, ObservedBoard, ObservedPile, Point, SolitaireCashBackend,
+    SolitaireCashCalibration, SolitaireCashLayout,
 };
+use super::solitaire_cash_templates::{MatchCandidate, MatchReport, TemplateLibrary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScreenRegion {
@@ -65,6 +66,54 @@ impl DebugOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotState {
+    Empty,
+    FaceDown,
+    FaceUp,
+    Recycle,
+}
+
+#[derive(Debug, Clone)]
+pub struct SlotReport {
+    pub label: String,
+    pub rect: NormalizedRect,
+    pub state: SlotState,
+    pub card: Option<Card>,
+    pub rank_candidates: Vec<MatchCandidate>,
+    pub suit_candidates: Vec<MatchCandidate>,
+    pub low_confidence: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecognitionReport {
+    pub board: ObservedBoard,
+    pub slots: Vec<SlotReport>,
+    pub annotated_path: Option<PathBuf>,
+    pub image_width: u32,
+    pub image_height: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct SelectedSlotPreview {
+    pub label: String,
+    pub face_rect: NormalizedRect,
+    pub rank_rect: NormalizedRect,
+    pub suit_rect: NormalizedRect,
+    pub rank_candidates: Vec<MatchCandidate>,
+    pub suit_candidates: Vec<MatchCandidate>,
+    pub rank_raw_png: Vec<u8>,
+    pub suit_raw_png: Vec<u8>,
+    pub rank_mask_png: Vec<u8>,
+    pub suit_mask_png: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CalibrationPreview {
+    pub report: RecognitionReport,
+    pub selected_slot: Option<SelectedSlotPreview>,
+}
+
 pub trait ScreenshotSource {
     fn capture_png(&mut self) -> Result<PathBuf, AdapterError>;
 }
@@ -106,175 +155,64 @@ impl Rect {
         }
     }
 
-}
-
-#[derive(Debug, Clone)]
-struct OcrObservation {
-    text: String,
-    min_x: f32,
-    min_y: f32,
-}
-
-#[derive(Debug, Clone)]
-struct SuitTemplate {
-    suit: char,
-    mask: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct VisionOcrRunner {
-    source_path: PathBuf,
-    executable_path: PathBuf,
-}
-
-impl Default for VisionOcrRunner {
-    fn default() -> Self {
-        let base = std::env::temp_dir().join("lonelybot-solitaire-cash-vision-ocr");
-        Self {
-            source_path: base.with_extension("swift"),
-            executable_path: base.with_extension("bin"),
-        }
-    }
-}
-
-impl VisionOcrRunner {
-    fn recognize(&self, image_path: &Path) -> Result<Vec<OcrObservation>, AdapterError> {
-        self.ensure_compiled()?;
-        let output = Command::new(&self.executable_path)
-            .arg(image_path)
-            .output()
-            .map_err(|err| {
-                AdapterError::RecognitionError(format!(
-                    "failed to launch Vision OCR helper: {err}"
-                ))
-            })?;
-
-        if !output.status.success() {
-            return Err(AdapterError::RecognitionError(format!(
-                "Vision OCR helper exited with status {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-
-        let mut observations = Vec::new();
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let mut parts = line.split('\t');
-            let Some(text) = parts.next() else { continue };
-            let Some(min_x) = parts.next() else { continue };
-            let Some(min_y) = parts.next() else { continue };
-            let Some(_width) = parts.next() else { continue };
-            let Some(_height) = parts.next() else { continue };
-
-            observations.push(OcrObservation {
-                text: text.to_string(),
-                min_x: min_x.parse().unwrap_or(0.0),
-                min_y: min_y.parse().unwrap_or(0.0),
-            });
-        }
-
-        Ok(observations)
+    fn to_normalized(self, image_width: u32, image_height: u32) -> NormalizedRect {
+        NormalizedRect::new(
+            self.x as f32 / image_width.max(1) as f32,
+            self.y as f32 / image_height.max(1) as f32,
+            self.width as f32 / image_width.max(1) as f32,
+            self.height as f32 / image_height.max(1) as f32,
+        )
     }
 
-    fn ensure_compiled(&self) -> Result<(), AdapterError> {
-        if self.executable_path.exists() {
-            return Ok(());
-        }
-
-        eprintln!(
-            "[solitaire-cash-debug] compiling Vision OCR helper to {}",
-            self.executable_path.display()
-        );
-
-        if let Some(parent) = self.source_path.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                AdapterError::RecognitionError(format!(
-                    "failed to create OCR helper directory: {err}"
-                ))
-            })?;
-        }
-
-        fs::write(&self.source_path, VISION_OCR_SWIFT).map_err(|err| {
-            AdapterError::RecognitionError(format!("failed to write OCR helper source: {err}"))
-        })?;
-
-        let output = Command::new("swiftc")
-            .arg(&self.source_path)
-            .arg("-o")
-            .arg(&self.executable_path)
-            .output()
-            .map_err(|err| {
-                AdapterError::RecognitionError(format!(
-                    "failed to compile Vision OCR helper: {err}"
-                ))
-            })?;
-
-        if !output.status.success() {
-            return Err(AdapterError::RecognitionError(format!(
-                "swiftc failed while compiling Vision OCR helper: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-
-        Ok(())
+    fn from_normalized(image_width: u32, image_height: u32, rect: NormalizedRect) -> Self {
+        Self::from_norm(
+            image_width,
+            image_height,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+        )
     }
 }
-
-const VISION_OCR_SWIFT: &str = r#"import Foundation
-import Vision
-import CoreGraphics
-import ImageIO
-
-let path = CommandLine.arguments[1]
-let url = URL(fileURLWithPath: path)
-guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-      let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
-    fputs("failed to load image\n", stderr)
-    exit(2)
-}
-
-let req = VNRecognizeTextRequest()
-req.recognitionLevel = .accurate
-req.usesLanguageCorrection = false
-req.minimumTextHeight = 0.02
-
-let handler = VNImageRequestHandler(cgImage: img, options: [:])
-try handler.perform([req])
-
-for obs in req.results ?? [] {
-    guard let top = obs.topCandidates(1).first else { continue }
-    let bb = obs.boundingBox
-    let topY = 1.0 - bb.minY - bb.height
-    print("\(top.string)\t\(bb.minX)\t\(topY)\t\(bb.width)\t\(bb.height)")
-}
-"#;
 
 #[derive(Debug, Clone)]
 pub struct PapayaSolitaireCashRecognizer {
-    suit_templates: Vec<SuitTemplate>,
-    ocr: VisionOcrRunner,
-    temp_dir: PathBuf,
-    next_temp_id: u64,
+    calibration: SolitaireCashCalibration,
+    templates: TemplateLibrary,
+    next_debug_id: u64,
     debug: DebugOptions,
+}
+
+#[derive(Debug, Clone)]
+struct CardRecognition {
+    card: Option<Card>,
+    rank: Option<MatchReport>,
+    suit: Option<MatchReport>,
+    low_confidence: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CardCornerSignal {
+    accepted_pair: bool,
+    rank_best: f32,
+    suit_best: f32,
 }
 
 impl PapayaSolitaireCashRecognizer {
     pub fn from_asset_dir(asset_dir: impl AsRef<Path>) -> Result<Self, AdapterError> {
         let asset_dir = asset_dir.as_ref();
-        let suit_templates = vec![
-            Self::load_template(asset_dir.join("Club.png"), 'C')?,
-            Self::load_template(asset_dir.join("Diamond.png"), 'D')?,
-            Self::load_template(asset_dir.join("Heart.png"), 'H')?,
-            Self::load_template(asset_dir.join("Spade.png"), 'S')?,
-        ];
-
         Ok(Self {
-            suit_templates,
-            ocr: VisionOcrRunner::default(),
-            temp_dir: std::env::temp_dir().join("lonelybot-solitaire-cash-crops"),
-            next_temp_id: 0,
+            calibration: SolitaireCashCalibration::default(),
+            templates: TemplateLibrary::load(asset_dir)?,
+            next_debug_id: 0,
             debug: DebugOptions::default(),
         })
+    }
+
+    pub fn with_calibration(mut self, calibration: SolitaireCashCalibration) -> Self {
+        self.calibration = calibration;
+        self
     }
 
     pub fn with_debug(mut self, debug: DebugOptions) -> Self {
@@ -282,17 +220,13 @@ impl PapayaSolitaireCashRecognizer {
         self
     }
 
-    fn load_template(path: PathBuf, suit: char) -> Result<SuitTemplate, AdapterError> {
-        let image = image::open(&path).map_err(|err| {
-            AdapterError::RecognitionError(format!(
-                "failed to load suit template {}: {err}",
-                path.display()
-            ))
-        })?;
-        Ok(SuitTemplate {
-            suit,
-            mask: Self::binary_mask(image.to_luma8()),
-        })
+    fn apply_relative_rect(rect: Rect, crop: NormalizedRect) -> Rect {
+        Rect {
+            x: rect.x + (rect.width as f32 * crop.x) as u32,
+            y: rect.y + (rect.height as f32 * crop.y) as u32,
+            width: (rect.width as f32 * crop.width).max(1.0) as u32,
+            height: (rect.height as f32 * crop.height).max(1.0) as u32,
+        }
     }
 
     fn card_rect(
@@ -312,27 +246,53 @@ impl PapayaSolitaireCashRecognizer {
         )
     }
 
-    fn white_ratio(image: &DynamicImage, rect: Rect) -> f32 {
+    fn white_ratio(&self, image: &DynamicImage, rect: Rect) -> f32 {
         let crop = image.crop_imm(rect.x, rect.y, rect.width, rect.height).to_rgb8();
         let mut white = 0usize;
         let total = crop.pixels().len().max(1);
+        let threshold = self.calibration.vision.white_min_rgb;
         for px in crop.pixels() {
-            if px[0] > 220 && px[1] > 220 && px[2] > 220 {
+            if px[0] > threshold && px[1] > threshold && px[2] > threshold {
                 white += 1;
             }
         }
         white as f32 / total as f32
     }
 
-    fn purple_ratio(image: &DynamicImage, rect: Rect) -> f32 {
+    fn ink_ratio(&self, image: &DynamicImage, rect: Rect) -> f32 {
+        let crop = image.crop_imm(rect.x, rect.y, rect.width, rect.height).to_rgb8();
+        let mut ink = 0usize;
+        let total = crop.pixels().len().max(1);
+        let vision = self.calibration.vision;
+        for px in crop.pixels() {
+            let is_white = px[0] > vision.white_min_rgb
+                && px[1] > vision.white_min_rgb
+                && px[2] > vision.white_min_rgb;
+            let distance_from_background =
+                (i32::from(px[0]) - i32::from(vision.background_rgb[0])).abs()
+                    + (i32::from(px[1]) - i32::from(vision.background_rgb[1])).abs()
+                    + (i32::from(px[2]) - i32::from(vision.background_rgb[2])).abs();
+            if !is_white && distance_from_background > vision.background_distance_threshold {
+                ink += 1;
+            }
+        }
+        ink as f32 / total as f32
+    }
+
+    fn purple_ratio(&self, image: &DynamicImage, rect: Rect) -> f32 {
         let crop = image.crop_imm(rect.x, rect.y, rect.width, rect.height).to_rgb8();
         let mut purple = 0usize;
         let total = crop.pixels().len().max(1);
+        let vision = self.calibration.vision;
         for px in crop.pixels() {
             let r = i32::from(px[0]);
             let g = i32::from(px[1]);
             let b = i32::from(px[2]);
-            if b > 90 && r > 70 && b > g + 20 && r > g + 10 {
+            if b > vision.purple_blue_min.into()
+                && r > vision.purple_red_min.into()
+                && b > g + vision.purple_blue_over_green
+                && r > g + vision.purple_red_over_green
+            {
                 purple += 1;
             }
         }
@@ -340,296 +300,534 @@ impl PapayaSolitaireCashRecognizer {
     }
 
     fn is_face_up(&self, image: &DynamicImage, rect: Rect) -> bool {
-        Self::white_ratio(image, rect) > 0.40
+        let corner = self.top_left_probe_rect(rect, 0.24, 0.18);
+        self.face_up_probe_passes(image, corner)
     }
 
     fn is_face_down(&self, image: &DynamicImage, rect: Rect) -> bool {
-        Self::purple_ratio(image, rect) > 0.08
+        let top_band = self.top_strip_probe_rect(rect, 0.22);
+        self.purple_ratio(image, top_band) > self.calibration.vision.face_down_purple_ratio
     }
 
-    fn binary_mask(gray: GrayImage) -> Vec<u8> {
-        image::imageops::resize(&gray, 32, 32, FilterType::Triangle)
-            .pixels()
-            .map(|p| u8::from(p[0] < 220))
-            .collect()
+    fn top_left_probe_rect(&self, rect: Rect, width_fraction: f32, height_fraction: f32) -> Rect {
+        Rect {
+            x: rect.x,
+            y: rect.y,
+            width: (rect.width as f32 * width_fraction).max(1.0) as u32,
+            height: (rect.height as f32 * height_fraction).max(1.0) as u32,
+        }
     }
 
-    fn next_temp_path(&mut self, stem: &str) -> Result<PathBuf, AdapterError> {
-        fs::create_dir_all(&self.temp_dir).map_err(|err| {
-            AdapterError::RecognitionError(format!("failed to create crop temp dir: {err}"))
+    fn top_strip_probe_rect(&self, rect: Rect, height_fraction: f32) -> Rect {
+        Rect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width.max(1),
+            height: (rect.height as f32 * height_fraction).max(1.0) as u32,
+        }
+    }
+
+    fn exposed_strip_rect(&self, rect: Rect, exposed_height: u32) -> Rect {
+        Rect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width.max(1),
+            height: exposed_height.clamp(1, rect.height.max(1)),
+        }
+    }
+
+    fn face_up_probe_passes(&self, image: &DynamicImage, rect: Rect) -> bool {
+        self.white_ratio(image, rect) > self.calibration.vision.face_up_white_ratio
+            && self.ink_ratio(image, rect) > 0.04
+    }
+
+    fn normalized_y_to_pixels(&self, normalized_y: f32, image_height: u32, cap: u32) -> u32 {
+        ((normalized_y * image_height as f32).round() as u32)
+            .max(1)
+            .min(cap.max(1))
+    }
+
+    fn classify_tableau_hidden_state(
+        &self,
+        image: &DynamicImage,
+        rect: Rect,
+        layout: &SolitaireCashLayout,
+        image_height: u32,
+        label: &str,
+    ) -> SlotState {
+        let exposed = self.normalized_y_to_pixels(layout.hidden_fan_y, image_height, rect.height);
+        let strip = self.exposed_strip_rect(rect, exposed);
+        let face_probe = self.top_left_probe_rect(strip, 0.34, 1.0);
+        let purple = self.purple_ratio(image, strip);
+        let white = self.white_ratio(image, face_probe);
+        let ink = self.ink_ratio(image, face_probe);
+        let corner_signal = self.quick_card_corner_signal(image, rect).ok();
+        let corner_match = corner_signal.is_some_and(|signal| {
+            signal.accepted_pair || (signal.rank_best < 0.12 && signal.suit_best < 0.12)
+        });
+        let state = if purple > self.calibration.vision.face_down_purple_ratio && white < 0.55 {
+            SlotState::FaceDown
+        } else if white > self.calibration.vision.face_up_white_ratio
+            && ink > 0.04
+            && corner_match
+        {
+            SlotState::FaceUp
+        } else {
+            SlotState::Empty
+        };
+        if self.debug.enabled {
+            let corner_summary = corner_signal.map_or_else(
+                || "corner=none".to_string(),
+                |signal| {
+                    format!(
+                        "corner_match={} accepted_pair={} rank_best={:.3} suit_best={:.3}",
+                        corner_match, signal.accepted_pair, signal.rank_best, signal.suit_best
+                    )
+                },
+            );
+            self.debug.log(format!(
+                "{label} hidden-strip purple={purple:.3} white={white:.3} ink={ink:.3} {corner_summary} -> {state:?}"
+            ));
+        }
+        state
+    }
+
+    fn classify_tableau_visible_state(
+        &self,
+        image: &DynamicImage,
+        rect: Rect,
+        layout: &SolitaireCashLayout,
+        image_height: u32,
+        label: &str,
+    ) -> SlotState {
+        let exposed = self.normalized_y_to_pixels(layout.visible_fan_y, image_height, rect.height);
+        let strip = self.exposed_strip_rect(rect, exposed);
+        let face_probe = self.top_left_probe_rect(strip, 0.38, 1.0);
+        let purple = self.purple_ratio(image, strip);
+        let white = self.white_ratio(image, face_probe);
+        let ink = self.ink_ratio(image, face_probe);
+        let corner_signal = self.quick_card_corner_signal(image, rect).ok();
+        let corner_match = corner_signal.is_some_and(|signal| {
+            signal.accepted_pair || (signal.rank_best < 0.12 && signal.suit_best < 0.12)
+        });
+        let state = if purple < self.calibration.vision.face_down_purple_ratio
+            && white > 0.32
+            && ink > 0.035
+            && corner_match
+        {
+            SlotState::FaceUp
+        } else {
+            SlotState::Empty
+        };
+        if self.debug.enabled {
+            let corner_summary = corner_signal.map_or_else(
+                || "corner=none".to_string(),
+                |signal| {
+                    format!(
+                        "corner_match={} accepted_pair={} rank_best={:.3} suit_best={:.3}",
+                        corner_match, signal.accepted_pair, signal.rank_best, signal.suit_best
+                    )
+                },
+            );
+            self.debug.log(format!(
+                "{label} visible-strip purple={purple:.3} white={white:.3} ink={ink:.3} {corner_summary} -> {state:?}"
+            ));
+        }
+        state
+    }
+
+    fn next_debug_path(&mut self, stem: &str, suffix: &str) -> Result<Option<PathBuf>, AdapterError> {
+        let Some(dump_dir) = &self.debug.dump_dir else {
+            return Ok(None);
+        };
+        fs::create_dir_all(dump_dir).map_err(|err| {
+            AdapterError::RecognitionError(format!(
+                "failed to create debug crop dir {}: {err}",
+                dump_dir.display()
+            ))
         })?;
-        self.next_temp_id += 1;
-        Ok(self
-            .temp_dir
-            .join(format!("{stem}-{}-{}.png", std::process::id(), self.next_temp_id)))
+        self.next_debug_id += 1;
+        Ok(Some(dump_dir.join(format!(
+            "{stem}-{}-{}.{}",
+            std::process::id(),
+            self.next_debug_id,
+            suffix
+        ))))
     }
 
-    fn ocr_crop(
+    fn save_debug_crop(
         &mut self,
         image: &DynamicImage,
         rect: Rect,
         stem: &str,
-    ) -> Result<Vec<OcrObservation>, AdapterError> {
-        let path = self.next_temp_path(stem)?;
+    ) -> Result<(), AdapterError> {
+        let Some(path) = self.next_debug_path(stem, "png")? else {
+            return Ok(());
+        };
         image
             .crop_imm(rect.x, rect.y, rect.width, rect.height)
             .save(&path)
             .map_err(|err| {
                 AdapterError::RecognitionError(format!(
-                    "failed to save temporary OCR crop {}: {err}",
+                    "failed to save debug crop {}: {err}",
                     path.display()
                 ))
             })?;
-        self.ocr.recognize(&path)
+        self.debug.log(format!("saved debug crop {}", path.display()));
+        Ok(())
     }
 
-    fn normalize_rank(text: &str) -> Option<&'static str> {
-        let upper = text.trim().to_ascii_uppercase();
-        match upper.as_str() {
-            "A" | "1" => Some("A"),
-            "2" => Some("2"),
-            "3" => Some("3"),
-            "4" => Some("4"),
-            "5" => Some("5"),
-            "6" => Some("6"),
-            "7" => Some("7"),
-            "8" => Some("8"),
-            "9" => Some("9"),
-            "10" | "IO" | "1O" | "LO" => Some("10"),
-            "J" => Some("J"),
-            "Q" | "OQ" => Some("Q"),
-            "K" => Some("K"),
-            _ => None,
+    fn save_debug_mask(&mut self, mask: &GrayImage, stem: &str) -> Result<(), AdapterError> {
+        let Some(path) = self.next_debug_path(stem, "png")? else {
+            return Ok(());
+        };
+        mask
+            .save(&path)
+            .map_err(|err| {
+                AdapterError::RecognitionError(format!(
+                    "failed to save debug mask {}: {err}",
+                    path.display()
+                ))
+            })?;
+        self.debug.log(format!("saved debug mask {}", path.display()));
+        Ok(())
+    }
+
+    fn debug_slot_stem(&self, slot_label: &str, suffix: &str) -> String {
+        let mut sanitized = String::with_capacity(slot_label.len() + suffix.len() + 1);
+        for ch in slot_label.chars() {
+            if ch.is_ascii_alphanumeric() {
+                sanitized.push(ch);
+            } else {
+                sanitized.push('_');
+            }
+        }
+        sanitized.push('-');
+        sanitized.push_str(suffix);
+        sanitized
+    }
+
+    fn locate_face_anchor(&self, image: &DynamicImage, rect: Rect) -> Rect {
+        let crop = image.crop_imm(rect.x, rect.y, rect.width, rect.height).to_rgb8();
+        let mut left = 0u32;
+        let mut top = 0u32;
+        let vision = self.calibration.vision;
+
+        for x in 0..crop.width() {
+            let bright = (0..crop.height())
+                .filter(|y| {
+                    let px = crop.get_pixel(x, *y);
+                    px[0] > vision.white_min_rgb
+                        && px[1] > vision.white_min_rgb
+                        && px[2] > vision.white_min_rgb
+                })
+                .count();
+            if bright as f32 / crop.height().max(1) as f32 > vision.face_anchor_bright_ratio {
+                left = x.saturating_sub(vision.face_anchor_padding_px);
+                break;
+            }
+        }
+        for y in 0..crop.height() {
+            let bright = (0..crop.width())
+                .filter(|x| {
+                    let px = crop.get_pixel(*x, y);
+                    px[0] > vision.white_min_rgb
+                        && px[1] > vision.white_min_rgb
+                        && px[2] > vision.white_min_rgb
+                })
+                .count();
+            if bright as f32 / crop.width().max(1) as f32 > vision.face_anchor_bright_ratio {
+                top = y.saturating_sub(vision.face_anchor_padding_px);
+                break;
+            }
+        }
+
+        Rect {
+            x: rect.x + left,
+            y: rect.y + top,
+            width: rect.width.saturating_sub(left).max(1),
+            height: rect.height.saturating_sub(top).max(1),
         }
     }
 
-    fn rank_for_card(&mut self, image: &DynamicImage, rect: Rect) -> Result<Option<&'static str>, AdapterError> {
-        let observations = self.ocr_crop(image, rect, "card-rank")?;
-        if self.debug.enabled {
-            let raw = observations
-                .iter()
-                .map(|obs| format!("{}@{:.3},{:.3}", obs.text, obs.min_x, obs.min_y))
-                .collect::<Vec<_>>()
-                .join(", ");
-            self.debug.log(format!("rank OCR candidates: {raw}"));
-        }
-        Ok(observations
-            .iter()
-            .filter_map(|obs| Self::normalize_rank(&obs.text))
-            .next())
+    fn grayscale_crop(&self, image: &DynamicImage, rect: Rect) -> GrayImage {
+        image
+            .crop_imm(rect.x, rect.y, rect.width, rect.height)
+            .to_luma8()
     }
 
-    fn largest_dark_component_mask(
+    fn image_to_png_bytes(&self, image: &DynamicImage) -> Result<Vec<u8>, AdapterError> {
+        let mut out = Cursor::new(Vec::new());
+        image.write_to(&mut out, ImageFormat::Png).map_err(|err| {
+            AdapterError::RecognitionError(format!("failed to encode preview png: {err}"))
+        })?;
+        Ok(out.into_inner())
+    }
+
+    fn gray_to_png_bytes(&self, image: &GrayImage) -> Result<Vec<u8>, AdapterError> {
+        self.image_to_png_bytes(&DynamicImage::ImageLuma8(image.clone()))
+    }
+
+    fn rank_rect(&self, rect: Rect) -> Rect {
+        Self::apply_relative_rect(rect, self.calibration.vision.rank_rect)
+    }
+
+    fn suit_rect(&self, rect: Rect) -> Rect {
+        Self::apply_relative_rect(rect, self.calibration.vision.suit_rect)
+    }
+
+    fn quick_card_corner_signal(
         &self,
         image: &DynamicImage,
         rect: Rect,
-    ) -> Option<Vec<u8>> {
-        let crop = image
-            .crop_imm(rect.x, rect.y, rect.width, rect.height)
-            .to_luma8();
-        let resized = image::imageops::resize(&crop, 48, 48, FilterType::Triangle);
-        let mut min_x = 48usize;
-        let mut min_y = 48usize;
-        let mut max_x = 0usize;
-        let mut max_y = 0usize;
-        let mut found = false;
-
-        for (x, y, p) in resized.enumerate_pixels() {
-            if p[0] < 220 {
-                found = true;
-                min_x = min_x.min(x as usize);
-                min_y = min_y.min(y as usize);
-                max_x = max_x.max(x as usize);
-                max_y = max_y.max(y as usize);
-            }
-        }
-
-        if !found {
-            return None;
-        }
-
-        let sub = image::imageops::crop_imm(
-            &resized,
-            min_x as u32,
-            min_y as u32,
-            (max_x - min_x + 1) as u32,
-            (max_y - min_y + 1) as u32,
-        )
-        .to_image();
-        Some(Self::binary_mask(sub))
+    ) -> Result<CardCornerSignal, AdapterError> {
+        let anchored = self.locate_face_anchor(image, rect);
+        let rank = self
+            .templates
+            .match_rank(&self.grayscale_crop(image, self.rank_rect(anchored)))?;
+        let suit = self
+            .templates
+            .match_suit(&self.grayscale_crop(image, self.suit_rect(anchored)))?;
+        Ok(CardCornerSignal {
+            accepted_pair: rank.accepted.is_some() && suit.accepted.is_some(),
+            rank_best: rank.candidates.first().map_or(1.0, |candidate| candidate.score),
+            suit_best: suit.candidates.first().map_or(1.0, |candidate| candidate.score),
+        })
     }
 
-    fn suit_for_card(&self, image: &DynamicImage, rect: Rect) -> Result<Option<char>, AdapterError> {
-        let suit_rect = Rect {
-            x: rect.x + (rect.width as f32 * 0.20) as u32,
-            y: rect.y + (rect.height as f32 * 0.24) as u32,
-            width: (rect.width as f32 * 0.36) as u32,
-            height: (rect.height as f32 * 0.34) as u32,
-        };
-        let Some(mask) = self.largest_dark_component_mask(image, suit_rect) else {
-            return Ok(None);
-        };
-
-        let best = self
-            .suit_templates
-            .iter()
-            .map(|template| {
-                let score = mask
-                    .iter()
-                    .zip(&template.mask)
-                    .map(|(a, b)| i32::from(*a != *b))
-                    .sum::<i32>();
-                (score, template.suit)
-            })
-            .min_by_key(|(score, _)| *score)
-            .map(|(_, suit)| suit);
-
+    fn match_rank_report(
+        &mut self,
+        image: &DynamicImage,
+        rect: Rect,
+        slot_label: &str,
+    ) -> Result<MatchReport, AdapterError> {
+        let rank_rect = self.rank_rect(self.locate_face_anchor(image, rect));
+        self.save_debug_crop(image, rank_rect, &self.debug_slot_stem(slot_label, "rank-raw"))?;
+        let gray = self.grayscale_crop(image, rank_rect);
+        let report = self.templates.match_rank(&gray)?;
+        self.save_debug_mask(
+            &report.normalized_mask,
+            &self.debug_slot_stem(slot_label, "rank-mask"),
+        )?;
         if self.debug.enabled {
             self.debug.log(format!(
-                "suit match at ({}, {}, {}, {}) => {:?}",
-                suit_rect.x, suit_rect.y, suit_rect.width, suit_rect.height, best
+                "{slot_label} rank candidates: {}",
+                report
+                    .candidates
+                    .iter()
+                    .take(3)
+                    .map(|candidate| format!("{}:{:.3}", candidate.label, candidate.score))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
-
-        Ok(best)
+        Ok(report)
     }
 
-    fn recognize_card(&mut self, image: &DynamicImage, rect: Rect) -> Result<Option<Card>, AdapterError> {
-        let Some(rank) = self.rank_for_card(image, rect)? else {
-            return Ok(None);
-        };
-        let Some(suit) = self.suit_for_card(image, rect)? else {
-            return Ok(None);
-        };
-        Ok(parse_card(&format!("{rank}{suit}")))
-    }
-
-    fn recognize_foundation(
+    fn match_suit_report(
         &mut self,
         image: &DynamicImage,
-        layout: &SolitaireCashLayout,
-    ) -> Result<[u8; N_SUITS as usize], AdapterError> {
-        let mut foundation = [0u8; N_SUITS as usize];
-        for suit_slot in 0..N_SUITS as usize {
-            let rect = Self::card_rect(
-                layout,
-                image.width(),
-                image.height(),
-                suit_slot,
-                layout.top_row_top,
-            );
-            if self.is_face_up(image, rect) {
-                if let Some(card) = self.recognize_card(image, rect)? {
-                    foundation[card.suit() as usize] = card.rank() + 1;
-                }
-            }
+        rect: Rect,
+        slot_label: &str,
+    ) -> Result<MatchReport, AdapterError> {
+        let suit_rect = self.suit_rect(self.locate_face_anchor(image, rect));
+        self.save_debug_crop(image, suit_rect, &self.debug_slot_stem(slot_label, "suit-raw"))?;
+        let gray = self.grayscale_crop(image, suit_rect);
+        let report = self.templates.match_suit(&gray)?;
+        self.save_debug_mask(
+            &report.normalized_mask,
+            &self.debug_slot_stem(slot_label, "suit-mask"),
+        )?;
+        if self.debug.enabled {
+            self.debug.log(format!(
+                "{slot_label} suit candidates: {}",
+                report
+                    .candidates
+                    .iter()
+                    .take(3)
+                    .map(|candidate| format!("{}:{:.3}", candidate.label, candidate.score))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
-        Ok(foundation)
+        Ok(report)
     }
 
-    fn recognize_piles(
+    fn recognize_card(
         &mut self,
         image: &DynamicImage,
-        layout: &SolitaireCashLayout,
-    ) -> Result<[ObservedPile; N_PILES as usize], AdapterError> {
-        core::array::from_fn(|pile_idx| {
-            let mut hidden_count = 0u8;
-            for hidden_idx in 0..=pile_idx {
-                let top = layout.tableau_top + layout.hidden_fan_y * hidden_idx as f32;
-                let rect =
-                    Self::card_rect(layout, image.width(), image.height(), pile_idx, top);
-                if self.is_face_down(image, rect) {
-                    hidden_count += 1;
-                } else {
-                    break;
-                }
-            }
-
-            let mut cards = PileVec::new();
-            for visible_idx in 0..13usize {
-                let top = layout.tableau_top
-                    + layout.hidden_fan_y * hidden_count as f32
-                    + layout.visible_fan_y * visible_idx as f32;
-                let rect =
-                    Self::card_rect(layout, image.width(), image.height(), pile_idx, top);
-                if !self.is_face_up(image, rect) {
-                    break;
-                }
-                if let Ok(Some(card)) = self.recognize_card(image, rect) {
-                    cards.push(card);
-                } else {
-                    break;
-                }
-            }
-
-            ObservedPile {
-                hidden_count,
-                cards,
-            }
+        rect: Rect,
+        slot_label: &str,
+    ) -> Result<CardRecognition, AdapterError> {
+        let rank = self.match_rank_report(image, rect, slot_label)?;
+        let suit = self.match_suit_report(image, rect, slot_label)?;
+        let low_confidence = rank.accepted.is_none() || suit.accepted.is_none();
+        let card = rank
+            .accepted
+            .as_deref()
+            .zip(suit.accepted.as_deref())
+            .and_then(|(rank, suit)| lonelybot::partial::parse_card(&format!("{rank}{suit}")));
+        Ok(CardRecognition {
+            card,
+            rank: Some(rank),
+            suit: Some(suit),
+            low_confidence,
         })
-        .pipe(Ok)
     }
 
-    fn recognize_waste(
-        &mut self,
-        image: &DynamicImage,
-        layout: &SolitaireCashLayout,
-    ) -> Result<ArrayVec<Card, { N_DECK_CARDS as usize }>, AdapterError> {
-        let image_width = image.width();
-        let image_height = image.height();
-        let card_width = (layout.card_width * image_width as f32).round() as u32;
-        let band = Rect::from_norm(
-            image_width,
-            image_height,
-            layout.column_lefts[4] - 0.02,
-            layout.top_row_top,
-            (layout.column_lefts[6] + layout.card_width) - (layout.column_lefts[4] - 0.02),
-            layout.card_height,
-        );
-        let observations = self.ocr_crop(image, band, "waste-band")?;
-        let mut waste = ArrayVec::<Card, { N_DECK_CARDS as usize }>::new();
+    fn classify_general_state(&self, image: &DynamicImage, rect: Rect) -> SlotState {
+        if self.is_face_up(image, rect) {
+            SlotState::FaceUp
+        } else if self.is_face_down(image, rect) {
+            SlotState::FaceDown
+        } else {
+            SlotState::Empty
+        }
+    }
 
-        let mut rank_obs: Vec<_> = observations
-            .into_iter()
-            .filter_map(|obs| Self::normalize_rank(&obs.text).map(|rank| (obs, rank)))
-            .filter(|(obs, _)| obs.min_y < 0.45)
-            .collect();
-        rank_obs.sort_by(|a, b| a.0.min_x.partial_cmp(&b.0.min_x).unwrap());
-
-        for (obs, rank) in rank_obs.into_iter().take(3) {
-            let card_left = band.x as i32 + (obs.min_x * band.width as f32).round() as i32
-                - (card_width as f32 * 0.04) as i32;
-            let rect = Rect {
-                x: card_left.max(0) as u32,
-                y: band.y,
-                width: card_width,
-                height: (layout.card_height * image_height as f32).round() as u32,
-            };
-            if let Some(suit) = self.suit_for_card(image, rect)? {
-                if let Some(card) = parse_card(&format!("{rank}{suit}")) {
-                    waste.push(card);
-                }
+    fn center_foreground_ratio(&self, image: &DynamicImage, rect: Rect) -> f32 {
+        let vision = self.calibration.vision;
+        let inset_x = (rect.width as f32 * vision.center_foreground_inset_x) as u32;
+        let inset_y = (rect.height as f32 * vision.center_foreground_inset_y) as u32;
+        let inner = Rect {
+            x: rect.x + inset_x,
+            y: rect.y + inset_y,
+            width: rect.width.saturating_sub(inset_x * 2).max(1),
+            height: rect.height.saturating_sub(inset_y * 2).max(1),
+        };
+        let crop = image.crop_imm(inner.x, inner.y, inner.width, inner.height).to_rgb8();
+        let mut foreground = 0usize;
+        let total = crop.pixels().len().max(1);
+        for px in crop.pixels() {
+            let r = i32::from(px[0]);
+            let g = i32::from(px[1]);
+            let b = i32::from(px[2]);
+            if (r - i32::from(vision.background_rgb[0])).abs()
+                + (g - i32::from(vision.background_rgb[1])).abs()
+                + (b - i32::from(vision.background_rgb[2])).abs()
+                > vision.background_distance_threshold
+            {
+                foreground += 1;
             }
         }
-
-        Ok(waste)
+        foreground as f32 / total as f32
     }
-}
 
-trait Pipe: Sized {
-    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
-        f(self)
+    fn classify_stock_state(&self, image: &DynamicImage, rect: Rect) -> SlotState {
+        if self.is_face_down(image, rect) {
+            SlotState::FaceDown
+        } else if self.center_foreground_ratio(image, rect)
+            > self.calibration.vision.recycle_foreground_ratio
+        {
+            SlotState::Recycle
+        } else {
+            SlotState::Empty
+        }
     }
-}
 
-impl<T> Pipe for T {}
+    fn record_slot(
+        &self,
+        reports: &mut Vec<SlotReport>,
+        label: impl Into<String>,
+        rect: Rect,
+        image_width: u32,
+        image_height: u32,
+        state: SlotState,
+        recognition: Option<CardRecognition>,
+    ) {
+        let (card, rank_candidates, suit_candidates, low_confidence) = recognition
+            .map(|recognition| {
+                (
+                    recognition.card,
+                    recognition.rank.map_or_else(Vec::new, |report| report.candidates),
+                    recognition.suit.map_or_else(Vec::new, |report| report.candidates),
+                    recognition.low_confidence,
+                )
+            })
+            .unwrap_or_else(|| (None, Vec::new(), Vec::new(), false));
+        reports.push(SlotReport {
+            label: label.into(),
+            rect: rect.to_normalized(image_width, image_height),
+            state,
+            card,
+            rank_candidates,
+            suit_candidates,
+            low_confidence,
+        });
+    }
 
-impl PngBoardRecognizer for PapayaSolitaireCashRecognizer {
-    fn recognize_board_from_png(
+    fn waste_rects(&self, layout: &SolitaireCashLayout, image_width: u32, image_height: u32) -> [Rect; 3] {
+        let overlap = layout.card_width * self.calibration.vision.waste_overlap;
+        core::array::from_fn(|idx| {
+            Rect::from_norm(
+                image_width,
+                image_height,
+                layout.waste_origin.x + overlap * idx as f32,
+                layout.waste_origin.y,
+                layout.card_width,
+                layout.card_height,
+            )
+        })
+    }
+
+    fn draw_rect_outline(image: &mut RgbaImage, rect: Rect, color: Rgba<u8>) {
+        let max_x = image.width().saturating_sub(1);
+        let max_y = image.height().saturating_sub(1);
+        let left = rect.x.min(max_x);
+        let top = rect.y.min(max_y);
+        let right = rect.x.saturating_add(rect.width).saturating_sub(1).min(max_x);
+        let bottom = rect.y.saturating_add(rect.height).saturating_sub(1).min(max_y);
+        for x in left..=right {
+            image.put_pixel(x, top, color);
+            image.put_pixel(x, bottom, color);
+        }
+        for y in top..=bottom {
+            image.put_pixel(left, y, color);
+            image.put_pixel(right, y, color);
+        }
+    }
+
+    fn state_color(state: SlotState) -> Rgba<u8> {
+        match state {
+            SlotState::Empty => Rgba([120, 180, 120, 255]),
+            SlotState::FaceDown => Rgba([140, 90, 220, 255]),
+            SlotState::FaceUp => Rgba([255, 255, 255, 255]),
+            SlotState::Recycle => Rgba([240, 180, 80, 255]),
+        }
+    }
+
+    fn save_annotated_overlay(
+        &mut self,
+        image: &DynamicImage,
+        rects: &[(Rect, SlotState)],
+        png_path: &Path,
+    ) -> Result<Option<PathBuf>, AdapterError> {
+        let Some(path) = self.next_debug_path(
+            png_path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("annotated"),
+            "png",
+        )?
+        else {
+            return Ok(None);
+        };
+        let mut annotated = image.to_rgba8();
+        for (rect, state) in rects {
+            Self::draw_rect_outline(&mut annotated, *rect, Self::state_color(*state));
+        }
+        annotated.save(&path).map_err(|err| {
+            AdapterError::RecognitionError(format!(
+                "failed to save annotated overlay {}: {err}",
+                path.display()
+            ))
+        })?;
+        self.debug.log(format!("saved annotated overlay {}", path.display()));
+        Ok(Some(path))
+    }
+
+    pub fn inspect_png(
         &mut self,
         png_path: &Path,
         layout: &SolitaireCashLayout,
-    ) -> Result<ObservedBoard, AdapterError> {
+    ) -> Result<RecognitionReport, AdapterError> {
         let image = image::open(png_path).map_err(|err| {
             AdapterError::RecognitionError(format!(
                 "failed to load screenshot {}: {err}",
@@ -637,9 +835,134 @@ impl PngBoardRecognizer for PapayaSolitaireCashRecognizer {
             ))
         })?;
 
-        let foundation = self.recognize_foundation(&image, layout)?;
-        let piles = self.recognize_piles(&image, layout)?;
-        let waste = self.recognize_waste(&image, layout)?;
+        let mut slot_reports = Vec::new();
+        let mut overlay_rects = Vec::new();
+        let mut foundation = [0u8; N_SUITS as usize];
+        for suit_slot in 0..N_SUITS as usize {
+            let label = format!("foundation-{}", suit_slot + 1);
+            let rect = Self::card_rect(layout, image.width(), image.height(), suit_slot, layout.top_row_top);
+            let state = self.classify_general_state(&image, rect);
+            overlay_rects.push((rect, state));
+            let recognition = if state == SlotState::FaceUp {
+                Some(self.recognize_card(&image, rect, &label)?)
+            } else {
+                None
+            };
+            if let Some(card) = recognition.as_ref().and_then(|result| result.card) {
+                foundation[card.suit() as usize] = card.rank() + 1;
+            }
+            self.record_slot(
+                &mut slot_reports,
+                label,
+                rect,
+                image.width(),
+                image.height(),
+                state,
+                recognition,
+            );
+        }
+
+        let piles = core::array::from_fn(|pile_idx| {
+            let mut hidden_count = 0u8;
+            for hidden_idx in 0..=pile_idx {
+                let label = format!("pile-{}-hidden-{}", pile_idx + 1, hidden_idx + 1);
+                let rect = Self::card_rect(
+                    layout,
+                    image.width(),
+                    image.height(),
+                    pile_idx,
+                    layout.tableau_top + layout.hidden_fan_y * hidden_idx as f32,
+                );
+                let state = self.classify_tableau_hidden_state(
+                    &image,
+                    rect,
+                    layout,
+                    image.height(),
+                    &label,
+                );
+                overlay_rects.push((rect, state));
+                match state {
+                    SlotState::FaceDown => {
+                        hidden_count += 1;
+                        self.record_slot(
+                            &mut slot_reports,
+                            label,
+                            rect,
+                            image.width(),
+                            image.height(),
+                            state,
+                            None,
+                        );
+                    }
+                    SlotState::FaceUp => break,
+                    SlotState::Empty | SlotState::Recycle => break,
+                }
+            }
+
+            let mut cards = PileVec::new();
+            for visible_idx in 0..13usize {
+                let label = format!("pile-{}-visible-{}", pile_idx + 1, visible_idx + 1);
+                let top = layout.tableau_top
+                    + layout.hidden_fan_y * hidden_count as f32
+                    + layout.visible_fan_y * visible_idx as f32;
+                let rect = Self::card_rect(layout, image.width(), image.height(), pile_idx, top);
+                let state = self.classify_tableau_visible_state(
+                    &image,
+                    rect,
+                    layout,
+                    image.height(),
+                    &label,
+                );
+                overlay_rects.push((rect, state));
+                if state != SlotState::FaceUp {
+                    break;
+                }
+                let recognition = self.recognize_card(&image, rect, &label).ok();
+                if let Some(card) = recognition.as_ref().and_then(|result| result.card) {
+                    cards.push(card);
+                }
+                self.record_slot(
+                    &mut slot_reports,
+                    label,
+                    rect,
+                    image.width(),
+                    image.height(),
+                    state,
+                    recognition,
+                );
+            }
+
+            ObservedPile { hidden_count, cards }
+        });
+
+        let mut waste = ArrayVec::<Card, { N_DECK_CARDS as usize }>::new();
+        for (idx, rect) in self
+            .waste_rects(layout, image.width(), image.height())
+            .into_iter()
+            .enumerate()
+        {
+            let label = format!("waste-{}", idx + 1);
+            let state = self.classify_general_state(&image, rect);
+            overlay_rects.push((rect, state));
+            let recognition = if state == SlotState::FaceUp {
+                Some(self.recognize_card(&image, rect, &label)?)
+            } else {
+                None
+            };
+            if let Some(card) = recognition.as_ref().and_then(|result| result.card) {
+                waste.push(card);
+            }
+            self.record_slot(
+                &mut slot_reports,
+                label,
+                rect,
+                image.width(),
+                image.height(),
+                state,
+                recognition,
+            );
+        }
+
         let stock_rect = Rect::from_norm(
             image.width(),
             image.height(),
@@ -648,14 +971,24 @@ impl PngBoardRecognizer for PapayaSolitaireCashRecognizer {
             layout.card_width,
             layout.card_height,
         );
-        let stock_present = self.is_face_down(&image, stock_rect);
+        let stock_state = self.classify_stock_state(&image, stock_rect);
+        overlay_rects.push((stock_rect, stock_state));
+        self.record_slot(
+            &mut slot_reports,
+            "stock",
+            stock_rect,
+            image.width(),
+            image.height(),
+            stock_state,
+            None,
+        );
 
         let board = ObservedBoard {
             foundation,
             piles,
             waste,
             stock_count: 0,
-            stock_present,
+            stock_present: matches!(stock_state, SlotState::FaceDown | SlotState::Recycle),
         };
 
         if self.debug.enabled {
@@ -674,7 +1007,103 @@ impl PngBoardRecognizer for PapayaSolitaireCashRecognizer {
             ));
         }
 
-        Ok(board)
+        Ok(RecognitionReport {
+            annotated_path: self.save_annotated_overlay(&image, &overlay_rects, png_path)?,
+            board,
+            slots: slot_reports,
+            image_width: image.width(),
+            image_height: image.height(),
+        })
+    }
+
+    pub fn inspect_png_with_calibration(
+        &self,
+        png_path: &Path,
+        calibration: &SolitaireCashCalibration,
+    ) -> Result<RecognitionReport, AdapterError> {
+        let mut recognizer = self.clone().with_calibration(*calibration);
+        recognizer.inspect_png(png_path, &calibration.layout)
+    }
+
+    pub fn preview_png_with_calibration(
+        &self,
+        png_path: &Path,
+        calibration: &SolitaireCashCalibration,
+        selected_slot: Option<&str>,
+    ) -> Result<CalibrationPreview, AdapterError> {
+        let mut recognizer = self.clone().with_calibration(*calibration);
+        let report = recognizer.inspect_png(png_path, &calibration.layout)?;
+        let Some(selected_label) = selected_slot else {
+            return Ok(CalibrationPreview {
+                report,
+                selected_slot: None,
+            });
+        };
+
+        let image = image::open(png_path).map_err(|err| {
+            AdapterError::RecognitionError(format!(
+                "failed to load screenshot {}: {err}",
+                png_path.display()
+            ))
+        })?;
+        let selected = report
+            .slots
+            .iter()
+            .find(|slot| slot.label == selected_label && slot.state == SlotState::FaceUp)
+            .cloned();
+        let Some(slot) = selected else {
+            return Ok(CalibrationPreview {
+                report,
+                selected_slot: None,
+            });
+        };
+
+        let image_width = report.image_width;
+        let image_height = report.image_height;
+        let slot_rect = Rect::from_normalized(image_width, image_height, slot.rect);
+        let face_rect = recognizer.locate_face_anchor(&image, slot_rect);
+        let rank_rect = recognizer.rank_rect(face_rect);
+        let suit_rect = recognizer.suit_rect(face_rect);
+        let rank_gray = recognizer.grayscale_crop(&image, rank_rect);
+        let suit_gray = recognizer.grayscale_crop(&image, suit_rect);
+        let rank_report = recognizer.templates.match_rank(&rank_gray)?;
+        let suit_report = recognizer.templates.match_suit(&suit_gray)?;
+
+        Ok(CalibrationPreview {
+            report,
+            selected_slot: Some(SelectedSlotPreview {
+                label: slot.label,
+                face_rect: face_rect.to_normalized(image_width, image_height),
+                rank_rect: rank_rect.to_normalized(image_width, image_height),
+                suit_rect: suit_rect.to_normalized(image_width, image_height),
+                rank_candidates: rank_report.candidates.clone(),
+                suit_candidates: suit_report.candidates.clone(),
+                rank_raw_png: recognizer.image_to_png_bytes(&image.crop_imm(
+                    rank_rect.x,
+                    rank_rect.y,
+                    rank_rect.width,
+                    rank_rect.height,
+                ))?,
+                suit_raw_png: recognizer.image_to_png_bytes(&image.crop_imm(
+                    suit_rect.x,
+                    suit_rect.y,
+                    suit_rect.width,
+                    suit_rect.height,
+                ))?,
+                rank_mask_png: recognizer.gray_to_png_bytes(&rank_report.normalized_mask)?,
+                suit_mask_png: recognizer.gray_to_png_bytes(&suit_report.normalized_mask)?,
+            }),
+        })
+    }
+}
+
+impl PngBoardRecognizer for PapayaSolitaireCashRecognizer {
+    fn recognize_board_from_png(
+        &mut self,
+        png_path: &Path,
+        layout: &SolitaireCashLayout,
+    ) -> Result<ObservedBoard, AdapterError> {
+        self.inspect_png(png_path, layout).map(|report| report.board)
     }
 }
 
